@@ -45,14 +45,18 @@ dependencies:
   intl: ^0.20.3
   collection: ^1.19.1
   crypto: ^3.0.7
-  connectivity_plus: ^7.3.1
-  device_info_plus: ^13.2.0
+  # Note: connectivity_plus and device_info_plus were removed — they were unused
+  # in Dart and their current releases reference iOS 26 APIs (isUltraConstrained /
+  # isiOSAppOnVision) that don't compile against the iOS 18.5 SDK in Xcode 16.4.
   nsd: ^5.0.1
   multicast_dns: ^0.3.3+1
   mobile_scanner: ^7.4.0
   tus_client: ^1.0.2
   cross_file: ^0.3.5+5
-  workmanager: ^0.10.9
+  # Pinned to the 0.9.2+1 family: workmanager_apple >= 0.9.6 references the
+  # iOS 26-only BGContinuedProcessingTask API, which fails to compile against
+  # the iOS 18.5 SDK bundled with Xcode 16.4. See dependency_overrides below.
+  workmanager: 0.9.2+1
   flutter_local_notifications: ^18.0.1
   timezone: ^0.9.4
   permission_handler: ^11.3.1
@@ -75,6 +79,15 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
   mocktail: ^1.0.5
+
+# Keep the whole workmanager federation on the pre-iOS-26 interface (0.9.3).
+# workmanager_apple 0.9.5 is the last release before BGContinuedProcessingTask
+# (iOS 26) was added in 0.9.6, so it still builds with Xcode 16.4 / iOS 18.5 SDK.
+# Remove these overrides once the toolchain is upgraded to Xcode 26.
+dependency_overrides:
+  workmanager_apple: 0.9.5
+  workmanager_android: 0.9.2
+  workmanager_platform_interface: 0.9.3
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
