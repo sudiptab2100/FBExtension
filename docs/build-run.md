@@ -47,6 +47,38 @@ validation. Build and sign iOS on the user's Mac with Xcode.
 Checked-in Xcode project deployment target is `15.0`. If product policy requires iOS 13,
 change and validate it deliberately in Xcode rather than only editing docs.
 
+Checked-in iOS bundle id is `com.sudiptab2100.localdriveApp`, `CODE_SIGN_STYLE = Automatic`,
+and no `DEVELOPMENT_TEAM` (each developer sets their own team in Xcode).
+
+### Install on a physical iPhone (sideload for testing)
+Requires a Mac with **full Xcode** (not just Command Line Tools) and **CocoaPods** installed,
+plus an Apple ID. A free Apple ID works for personal testing.
+
+One-time toolchain setup (only if the host has just Command Line Tools):
+```bash
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -license accept
+sudo gem install cocoapods    # or: brew install cocoapods
+```
+
+Signing (one-time): open `ios/Runner.xcworkspace` in Xcode, select the **Runner** target →
+**Signing & Capabilities** → enable **Automatically manage signing** → choose your **Team**
+(add your Apple ID via *Add an Account…*). If the bundle id is unavailable, make it unique.
+
+Install:
+```bash
+source ~/.localdrive_flutter_env.sh && flutter devices        # confirm the iPhone appears
+source ~/.localdrive_flutter_env.sh && flutter run --release -d <iphone-id>
+```
+On iOS 16+ enable **Settings → Privacy & Security → Developer Mode** first, and after the
+first install trust the developer cert under **Settings → General → VPN & Device Management**.
+On first launch allow the **Local Network** prompt and keep the phone on the same Wi‑Fi as the
+LocalDrive-Master host.
+
+Limits: a **free** Apple ID re-signs every **7 days** (re-run `flutter run` to reinstall) with
+at most 3 apps per device; a **paid** Apple Developer account ($99/yr) lasts a year and unlocks
+TestFlight for over-the-air installs.
+
 ## Tests
 Current tests are pure Dart/Flutter unit tests:
 | File | Coverage |
