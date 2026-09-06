@@ -48,4 +48,64 @@ void main() {
       expect(restored.scheme, 'https');
     });
   });
+
+  group('LdInstance addresses + candidates', () {
+    test('allHosts dedupes and orders IPv4 before .local', () {
+      const i = LdInstance(
+        scheme: 'http',
+        host: '192.168.1.20',
+        port: 4820,
+        name: 'mac',
+        source: InstanceSource.discovered,
+        hostname: 'mac.local',
+        addresses: ['mac.local', '192.168.1.20', '10.0.0.9'],
+      );
+      // Dedupes host/addresses; .local sorts after IPv4.
+      expect(i.allHosts, ['192.168.1.20', '10.0.0.9', 'mac.local']);
+      expect(i.addressSummary, '192.168.1.20 · 10.0.0.9 · mac.local');
+    });
+
+    test('addresses + httpsPort survive JSON + copyWith', () {
+      const i = LdInstance(
+        scheme: 'http',
+        host: '192.168.1.20',
+        port: 4820,
+        name: 'mac',
+        source: InstanceSource.discovered,
+        addresses: ['192.168.1.20', 'mac.local'],
+        httpsPort: 4843,
+      );
+      final restored = LdInstance.fromJson(i.toJson());
+      expect(restored.addresses, ['192.168.1.20', 'mac.local']);
+      expect(restored.httpsPort, 4843);
+      expect(restored.hasHttps, isTrue);
+      expect(i.copyWith(name: 'x').addresses, i.addresses);
+    });
+
+    test('orderedCandidates tries current endpoint, then HTTPS, then hosts', () {
+      const i = LdInstance(
+        scheme: 'http',
+        host: '192.168.1.20',
+        port: 4820,
+        name: 'mac',
+        source: InstanceSource.discovered,
+        addresses: ['192.168.1.20', 'mac.local'],
+        httpsPort: 4843,
+      );
+      final ids = i.orderedCandidates().map((c) => c.id).toList();
+      expect(ids, [
+        'http://192.168.1.20:4820', // the exact endpoint first
+        'https://192.168.1.20:4843', // HTTPS on IP
+        'https://mac.local:4843', // HTTPS on .local
+        'http://mac.local:4820', // HTTP on .local
+      ]);
+    });
+
+    test('bare HTTPS instance never invents HTTP on the HTTPS port', () {
+      // A QR-scanned https URL with no advertised httpsPort → only itself.
+      final i = LdInstance.tryParse('https://192.168.1.20:4843')!;
+      final ids = i.orderedCandidates().map((c) => c.id).toList();
+      expect(ids, ['https://192.168.1.20:4843']);
+    });
+  });
 }

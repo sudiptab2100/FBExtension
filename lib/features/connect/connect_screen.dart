@@ -2,12 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../core/network/api_exception.dart';
 import '../../data/models/ld_instance.dart';
 import '../../data/services/discovery_service.dart';
 import '../../routing/router.dart';
-import '../../state/connect_controller.dart';
 import '../../state/connection_controller.dart';
+import 'connect_flow.dart';
 
 /// First-run / server-chooser screen: saved servers, live LAN discovery, QR
 /// scan, and manual entry. Selecting a server makes it active.
@@ -25,56 +24,20 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      await ref.read(connectControllerProvider).connect(candidate);
+      await connectWithTrust(context, ref, candidate);
       // The router redirect takes over once the instance becomes active.
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      if (candidate.isHttps && e.isNetwork) {
-        _offerTrust(candidate);
-      } else {
-        _snack(e.message);
-      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  void _offerTrust(LdInstance candidate) {
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Untrusted certificate'),
-        content: Text(
-          '${candidate.host} uses a self-signed certificate. Trust it for '
-          'this server and continue?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _connect(candidate.copyWith(trustSelfSigned: true));
-            },
-            child: const Text('Trust & connect'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _snack(String message) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
-  }
-
   @override
   Widget build(BuildContext context) {
     final saved = ref.watch(connectionControllerProvider).instances;
-    final discovered = ref.watch(discoveredInstancesProvider);
+    final discovery = ref.watch(discoveryControllerProvider);
+    final fresh = discovery.instances
+        .where((d) => !saved.any((s) => s.id == d.id))
+        .toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -93,7 +56,6 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
             const _SectionHeader('Saved servers'),
             ...saved.map((i) => _InstanceTile(
                   instance: i,
-                  subtitle: i.baseUrl,
                   onTap: () => ref
                       .read(connectionControllerProvider.notifier)
                       .setActive(i.id),
@@ -103,32 +65,19 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                 )),
             const Divider(height: 24),
           ],
-          const _SectionHeader('On this network'),
-          discovered.when(
-            loading: () => const _Hint('Searching for servers…'),
-            error: (e, _) => _Hint('Discovery unavailable: $e'),
-            data: (list) {
-              final fresh = list
-                  .where((d) => !saved.any((s) => s.id == d.id))
-                  .toList();
-              if (fresh.isEmpty) {
-                return const _Hint(
-                  'No servers found yet. Make sure LocalDrive is running on a '
-                  'computer on the same Wi‑Fi, or add it manually below.',
-                );
-              }
-              return Column(
-                children: fresh
-                    .map((i) => _InstanceTile(
-                          instance: i,
-                          subtitle: i.baseUrl,
-                          leading: const Icon(Icons.wifi_tethering),
-                          onTap: () => _connect(i),
-                        ))
-                    .toList(),
-              );
-            },
+          _DiscoveryHeader(
+            phase: discovery.phase,
+            onRescan: () =>
+                ref.read(discoveryControllerProvider.notifier).rescan(),
           ),
+          if (fresh.isEmpty)
+            _DiscoveryEmpty(phase: discovery.phase, error: discovery.error)
+          else
+            ...fresh.map((i) => _InstanceTile(
+                  instance: i,
+                  leading: const Icon(Icons.wifi_tethering),
+                  onTap: () => _connect(i),
+                )),
           const SizedBox(height: 24),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -184,12 +133,66 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-class _Hint extends StatelessWidget {
-  const _Hint(this.text);
-  final String text;
+/// "On this network" header with a live search indicator + manual rescan.
+class _DiscoveryHeader extends StatelessWidget {
+  const _DiscoveryHeader({required this.phase, required this.onRescan});
+  final DiscoveryPhase phase;
+  final VoidCallback onRescan;
 
   @override
   Widget build(BuildContext context) {
+    final searching = phase == DiscoveryPhase.searching;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'ON THIS NETWORK',
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.primary,
+                    letterSpacing: 0.8,
+                  ),
+            ),
+          ),
+          if (searching)
+            const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          IconButton(
+            tooltip: 'Rescan',
+            icon: const Icon(Icons.refresh),
+            onPressed: searching ? null : onRescan,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DiscoveryEmpty extends StatelessWidget {
+  const _DiscoveryEmpty({required this.phase, this.error});
+  final DiscoveryPhase phase;
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    final String text;
+    if (phase == DiscoveryPhase.searching) {
+      text = 'Searching for servers on your Wi‑Fi…';
+    } else if (phase == DiscoveryPhase.error) {
+      text = '${error ?? 'Discovery failed.'}\n\n'
+          'On iPhone, make sure LocalDrive is allowed under Settings → '
+          'Privacy → Local Network, then tap rescan.';
+    } else {
+      text = 'No servers found. Make sure LocalDrive is running on a computer '
+          'on the same Wi‑Fi, then tap rescan — or add it manually below.';
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Text(
@@ -203,32 +206,74 @@ class _Hint extends StatelessWidget {
 class _InstanceTile extends StatelessWidget {
   const _InstanceTile({
     required this.instance,
-    required this.subtitle,
     required this.onTap,
     this.leading,
     this.onDelete,
   });
 
   final LdInstance instance;
-  final String subtitle;
   final VoidCallback onTap;
   final Widget? leading;
   final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
+    // Show every reachable address so the user can see all IPs and the .local
+    // name at a glance.
+    final subtitle = instance.addresses.isNotEmpty
+        ? instance.addressSummary
+        : instance.baseUrl;
     return ListTile(
       leading: leading ?? const Icon(Icons.dns_outlined),
       title: Text(instance.name),
-      subtitle: Text(subtitle),
+      subtitle: Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+      isThreeLine: instance.addresses.length > 1,
       onTap: onTap,
-      trailing: onDelete == null
-          ? const Icon(Icons.chevron_right)
-          : IconButton(
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _SchemeBadge(instance: instance),
+          if (onDelete != null)
+            IconButton(
               icon: const Icon(Icons.delete_outline),
               tooltip: 'Remove',
               onPressed: onDelete,
-            ),
+            )
+          else
+            const Icon(Icons.chevron_right),
+        ],
+      ),
+    );
+  }
+}
+
+/// A small HTTPS/HTTP badge so the user can tell secure servers apart.
+class _SchemeBadge extends StatelessWidget {
+  const _SchemeBadge({required this.instance});
+  final LdInstance instance;
+
+  @override
+  Widget build(BuildContext context) {
+    final secure = instance.isHttps || instance.hasHttps;
+    final scheme = Theme.of(context).colorScheme;
+    final color = secure ? scheme.primary : scheme.outline;
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(secure ? Icons.lock_outline : Icons.lock_open_outlined,
+              size: 14, color: color),
+          const SizedBox(width: 2),
+          Text(
+            secure ? 'HTTPS' : 'HTTP',
+            style: Theme.of(context)
+                .textTheme
+                .labelSmall
+                ?.copyWith(color: color, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
     );
   }
 }

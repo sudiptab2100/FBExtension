@@ -3,9 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-import '../../core/network/api_exception.dart';
 import '../../data/models/ld_instance.dart';
-import '../../state/connect_controller.dart';
+import 'connect_flow.dart';
 
 /// Scans a LocalDrive QR code (which encodes the server's base URL) and
 /// connects to it.
@@ -37,16 +36,12 @@ class _QrScanScreenState extends ConsumerState<QrScanScreen> {
     if (instance == null) return;
 
     setState(() => _handling = true);
-    try {
-      await ref.read(connectControllerProvider).connect(instance);
-      // On success the router redirect navigates away automatically.
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message)),
-      );
-      setState(() => _handling = false);
-    }
+    // Route through the shared connect flow so an HTTPS QR that points at a
+    // self-signed server offers the trust prompt instead of silently failing.
+    final ok = await connectWithTrust(context, ref, instance);
+    // On success the router redirect navigates away automatically; otherwise
+    // re-enable scanning so the user can retry.
+    if (!ok && mounted) setState(() => _handling = false);
   }
 
   @override

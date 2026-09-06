@@ -28,6 +28,7 @@ class Routes {
   static const connect = '/connect';
   static const qrScan = '/connect/scan';
   static const login = '/login';
+  static const addAccount = '/add-account';
   static const home = '/';
   static const files = '/files';
   static const search = '/search';
@@ -87,6 +88,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
       GoRoute(path: Routes.qrScan, builder: (_, _) => const QrScanScreen()),
       GoRoute(path: Routes.login, builder: (_, _) => const LoginScreen()),
+      GoRoute(
+        path: Routes.addAccount,
+        builder: (_, _) => const LoginScreen(addAccount: true),
+      ),
       GoRoute(path: Routes.home, builder: (_, _) => const HomeShell()),
       GoRoute(
         path: Routes.files,

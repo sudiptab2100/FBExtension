@@ -88,7 +88,12 @@ class StoreKeys {
   static const savedInstances = 'ld.instances';
   static const activeInstanceId = 'ld.active_instance';
   static const viewModePrefix = 'ld.view_mode.'; // + instanceId
-  static const tokenPrefix = 'ld.token.'; // secure; + instanceId
+  static const tokenPrefix = 'ld.token.'; // secure; + instanceId (legacy)
+  // Multi-account (per server): a token is stored per (instance, username) so
+  // several users can stay signed in on the same server and switch instantly.
+  static const userTokenSep = '::'; // secure key: ld.token.<instanceId>::<user>
+  static const accountsPrefix = 'ld.accounts.'; // prefs; + instanceId -> [Account]
+  static const activeAccountPrefix = 'ld.active_account.'; // prefs; + instanceId
   static const themeMode = 'ld.theme_mode';
   static const backupSettings = 'ld.backup_settings';
   static const lastChangeCursor = 'ld.change_cursor.'; // + instanceId

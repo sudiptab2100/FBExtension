@@ -10,6 +10,7 @@ import '../../routing/router.dart';
 import '../../state/api_providers.dart';
 import '../../state/session_controller.dart';
 import '../../widgets/status_views.dart';
+import '../auth/account_switcher.dart';
 
 /// All registered drives with the caller's access state. Refetches when the
 /// admin view mode changes so the list reflects the active scope.
@@ -31,12 +32,32 @@ class _DrivesScreenState extends ConsumerState<DrivesScreen> {
   Future<void> _requestAccess(DriveInfo drive) async {
     setState(() => _requesting.add(drive.uuid));
     try {
-      await ref.read(drivesRepositoryProvider).requestAccess(drive.uuid);
+      final access =
+          await ref.read(drivesRepositoryProvider).requestAccess(drive.uuid);
       ref.invalidate(drivesListProvider);
+      if (mounted) {
+        final msg = switch (access) {
+          DriveAccess.granted => 'Access granted to “${drive.label}”.',
+          DriveAccess.pending =>
+            'Request sent — waiting for admin approval.',
+          DriveAccess.denied => 'Your request was denied by the admin.',
+          DriveAccess.none => 'Request submitted.',
+        };
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(msg)));
+      }
     } on ApiException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    } catch (_) {
+      // Never leave the tap silent — surface an unexpected failure too.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Could not request access. Please try again.')),
+        );
       }
     } finally {
       if (mounted) setState(() => _requesting.remove(drive.uuid));
@@ -60,6 +81,7 @@ class _DrivesScreenState extends ConsumerState<DrivesScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        leading: const AccountSwitchButton(),
         title: const Text('Drives'),
         actions: [
           IconButton(

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/constants.dart';
+import '../../data/models/account.dart';
 import '../../data/models/ld_instance.dart';
 
 /// Non-secret app preferences: the saved server list, the active instance, the
@@ -52,6 +53,46 @@ class Prefs {
 
   Future<void> setViewMode(String instanceId, String mode) =>
       _prefs.setString('${StoreKeys.viewModePrefix}$instanceId', mode);
+
+  // ---- Accounts registry (per instance) -----------------------------------
+  // The non-secret list of signed-in accounts for a server (the token itself
+  // lives in SecureStore). Enables the in-app user switcher.
+  List<Account> accounts(String instanceId) {
+    final raw = _prefs.getString('${StoreKeys.accountsPrefix}$instanceId');
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final list = jsonDecode(raw) as List;
+      return list
+          .map((e) => Account.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> writeAccounts(String instanceId, List<Account> list) {
+    final key = '${StoreKeys.accountsPrefix}$instanceId';
+    if (list.isEmpty) return _prefs.remove(key);
+    return _prefs.setString(
+        key, jsonEncode(list.map((e) => e.toJson()).toList()));
+  }
+
+  String? activeAccount(String instanceId) =>
+      _prefs.getString('${StoreKeys.activeAccountPrefix}$instanceId');
+
+  Future<void> setActiveAccount(String instanceId, String? username) async {
+    final key = '${StoreKeys.activeAccountPrefix}$instanceId';
+    if (username == null) {
+      await _prefs.remove(key);
+    } else {
+      await _prefs.setString(key, username);
+    }
+  }
+
+  Future<void> clearAccounts(String instanceId) async {
+    await _prefs.remove('${StoreKeys.accountsPrefix}$instanceId');
+    await _prefs.remove('${StoreKeys.activeAccountPrefix}$instanceId');
+  }
 
   // ---- Theme mode ----------------------------------------------------------
   String get themeMode => _prefs.getString(StoreKeys.themeMode) ?? 'system';

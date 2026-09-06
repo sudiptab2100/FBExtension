@@ -61,6 +61,9 @@ class ConnectionController extends Notifier<ConnectionState> {
       stored = list[idx].copyWith(
         name: instance.name,
         hostname: instance.hostname,
+        addresses:
+            instance.addresses.isNotEmpty ? instance.addresses : null,
+        httpsPort: instance.httpsPort,
         source: instance.source,
         trustSelfSigned:
             instance.trustSelfSigned || list[idx].trustSelfSigned,
@@ -90,7 +93,10 @@ class ConnectionController extends Notifier<ConnectionState> {
       activeId: state.activeId == id ? null : state.activeId,
     );
     await _persist();
-    await ref.read(secureStoreProvider).deleteToken(id);
+    // Purge every stored token (legacy + per-account) and the accounts registry.
+    final usernames = _prefs.accounts(id).map((a) => a.username).toList();
+    await ref.read(secureStoreProvider).deleteInstanceTokens(id, usernames);
+    await _prefs.clearAccounts(id);
   }
 
   Future<void> markConnected(String id) async {

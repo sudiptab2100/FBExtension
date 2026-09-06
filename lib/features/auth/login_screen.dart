@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/network/api_exception.dart';
+import '../../routing/router.dart';
 import '../../state/api_providers.dart';
 import '../../state/connection_controller.dart';
 import '../../state/session_controller.dart';
@@ -12,7 +14,11 @@ final _authConfigProvider = FutureProvider.autoDispose(
 );
 
 class LoginScreen extends ConsumerStatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.addAccount = false});
+
+  /// When true, this screen adds *another* account to the current server
+  /// (the user is already signed in) instead of being the pre-auth gate.
+  final bool addAccount;
 
   @override
   ConsumerState<LoginScreen> createState() => _LoginScreenState();
@@ -55,12 +61,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           _showInfo(res.message ??
               'Your account is awaiting admin approval. You can sign in once '
                   'approved.');
+        } else if (!res.pending && mounted && widget.addAccount) {
+          context.go(Routes.home);
         }
       } else {
         await ref
             .read(sessionControllerProvider.notifier)
             .login(username, password);
-        // Success → router redirect navigates home.
+        // Normal mode → the router redirect navigates home. In add-account
+        // mode we're already authenticated, so navigate explicitly.
+        if (mounted && widget.addAccount) context.go(Routes.home);
       }
     } on ApiException catch (e) {
       if (mounted) setState(() => _error = e.message);
@@ -95,14 +105,24 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Sign in'),
+        title: Text(widget.addAccount ? 'Add account' : 'Sign in'),
         actions: [
           TextButton.icon(
-            onPressed: () => ref
-                .read(connectionControllerProvider.notifier)
-                .setActive(null),
-            icon: const Icon(Icons.swap_horiz),
-            label: const Text('Change'),
+            onPressed: () {
+              if (widget.addAccount) {
+                if (context.canPop()) {
+                  context.pop();
+                } else {
+                  context.go(Routes.home);
+                }
+              } else {
+                ref
+                    .read(connectionControllerProvider.notifier)
+                    .setActive(null);
+              }
+            },
+            icon: Icon(widget.addAccount ? Icons.close : Icons.swap_horiz),
+            label: Text(widget.addAccount ? 'Cancel' : 'Change'),
           ),
         ],
       ),
@@ -132,6 +152,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         textAlign: TextAlign.center,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
+                    if (widget.addAccount) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'Add another account to this server. Your current '
+                        'session stays signed in and you can switch anytime.',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context).colorScheme.primary,
+                            ),
+                      ),
+                    ],
                     const SizedBox(height: 24),
                     if (sessionMessage != null && _error == null)
                       _Banner(sessionMessage,

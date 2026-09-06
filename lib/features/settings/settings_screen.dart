@@ -7,6 +7,7 @@ import '../../routing/router.dart';
 import '../../state/connection_controller.dart';
 import '../../state/session_controller.dart';
 import '../../state/settings_controller.dart';
+import '../auth/account_switcher.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -44,6 +45,16 @@ class SettingsScreen extends ConsumerWidget {
                       )
                     : null,
               ),
+            ),
+          if (user != null)
+            ListTile(
+              leading: const Icon(Icons.switch_account_outlined),
+              title: const Text('Switch or add account'),
+              subtitle: Text(session.hasMultipleAccounts
+                  ? '${session.accounts.length} accounts on this server'
+                  : 'Sign in as another user on this server'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => showAccountSwitcher(context, ref),
             ),
 
           // ---- Server --------------------------------------------------
