@@ -99,6 +99,9 @@ class RequestAccessSheet extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(0, 48),
+                  ),
                   onPressed: () => Navigator.of(context).pop(true),
                   icon: const Icon(Icons.lock_open_outlined),
                   label: const Text('Request access'),

@@ -97,6 +97,9 @@ class AdminAccessScreen extends ConsumerWidget {
                             ),
                             const SizedBox(width: 8),
                             FilledButton(
+                              style: FilledButton.styleFrom(
+                                minimumSize: const Size(0, 48),
+                              ),
                               onPressed: () => _guard(
                                   context, ref, () => repo.approveAccess(r.id)),
                               child: const Text('Approve'),

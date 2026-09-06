@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:localdrive_app/core/config/theme.dart';
 import 'package:localdrive_app/data/models/drive_info.dart';
 import 'package:localdrive_app/features/drives/drives_screen.dart';
 
@@ -19,6 +20,7 @@ DriveInfo _drive(DriveAccess? access) => DriveInfo(
     );
 
 Widget _host(DriveInfo drive, {double width = 320}) => MaterialApp(
+      theme: AppTheme.light(),
       home: Scaffold(
         body: Center(
           child: SizedBox(
@@ -77,6 +79,21 @@ void main() {
       await tester.pumpWidget(_host(_drive(DriveAccess.pending)));
       expect(find.text('Pending'), findsOneWidget);
       expect(find.text('Request access'), findsNothing);
+    });
+
+    testWidgets(
+        'renders the request button under the real app theme at a narrow '
+        'width (regression: infinite-width crash)', (tester) async {
+      for (final access in [DriveAccess.none, DriveAccess.denied]) {
+        await tester.pumpWidget(_host(_drive(access), width: 200));
+        expect(tester.takeException(), isNull);
+        expect(
+          find.text(
+            access == DriveAccess.denied ? 'Request again' : 'Request access',
+          ),
+          findsOneWidget,
+        );
+      }
     });
   });
 }

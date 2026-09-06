@@ -770,6 +770,9 @@ class _EmptyFolder extends StatelessWidget {
             spacing: 12,
             children: [
               FilledButton.tonalIcon(
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(0, 48),
+                ),
                 onPressed: onUpload,
                 icon: const Icon(Icons.upload_file),
                 label: const Text('Upload'),
@@ -825,6 +828,9 @@ class _DestinationPickerState extends ConsumerState<_DestinationPicker> {
                       style: Theme.of(context).textTheme.titleLarge),
                 ),
                 FilledButton(
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(0, 48),
+                  ),
                   onPressed: () => Navigator.pop(context, _path),
                   child: const Text('Here'),
                 ),

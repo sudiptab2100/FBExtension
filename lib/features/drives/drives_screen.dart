@@ -287,26 +287,23 @@ class DriveCard extends StatelessWidget {
               ],
               if (requestable) ...[
                 const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    FilledButton.tonalIcon(
-                      onPressed: requesting ? null : onRequest,
-                      icon: requesting
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.lock_open_outlined, size: 18),
-                      label: Text(
-                        drive.access == DriveAccess.denied
-                            ? 'Request again'
-                            : 'Request access',
-                      ),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.tonalIcon(
+                    onPressed: requesting ? null : onRequest,
+                    icon: requesting
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.lock_open_outlined, size: 18),
+                    label: Text(
+                      drive.access == DriveAccess.denied
+                          ? 'Request again'
+                          : 'Request access',
                     ),
-                  ],
+                  ),
                 ),
               ],
             ],
