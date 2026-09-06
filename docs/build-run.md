@@ -122,6 +122,29 @@ Limits: a **free** Apple ID re-signs every **7 days** (re-run `flutter run` to r
 at most 3 apps per device; a **paid** Apple Developer account ($99/yr) lasts a year and unlocks
 TestFlight for over-the-air installs.
 
+#### Install without staying attached (devicectl)
+`flutter run` stays attached to the process. To just build, install, and detach:
+```bash
+source ~/.localdrive_flutter_env.sh && flutter build ios --release
+xcrun devicectl device install app --device <iphone-id> build/ios/iphoneos/Runner.app
+xcrun devicectl device process launch --device <iphone-id> com.sudiptab2100.localdriveApp
+```
+The **launch** step fails with `invalid code signature … profile has not been explicitly
+trusted` until you trust the cert on the phone (VPN & Device Management, above); after
+trusting, tap the home-screen icon or re-run the launch command.
+
+#### iOS 26 plugin pins (Xcode 16.4 / iOS 18.5 SDK)
+Some plugins adopted iOS 26-only APIs that don't compile against the iOS 18.5 SDK bundled with
+Xcode 16.4. To keep the app buildable on this host, `pubspec.yaml`:
+- pins `workmanager` to `0.9.2+1` and overrides its federated impls to the last pre-iOS-26
+  line (`workmanager_apple 0.9.5`, `workmanager_android 0.9.2`,
+  `workmanager_platform_interface 0.9.3`) — 0.9.6+ uses `BGContinuedProcessingTask`;
+- drops `connectivity_plus`/`device_info_plus` (both unused in Dart) because their current
+  releases reference `NWPath.isUltraConstrained` / `NSProcessInfo.isiOSAppOnVision`.
+
+Once the host upgrades to **Xcode 26** (matching the iPhone's iOS 26 SDK), these pins can be
+lifted and the plugins restored.
+
 ## Tests
 Current tests are pure Dart/Flutter unit tests:
 | File | Coverage |
