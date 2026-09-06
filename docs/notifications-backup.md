@@ -98,6 +98,21 @@ missing or `settings.runnable` is false. Backup work is registered as:
 The headless upload client also forces `ld_view=user`, preserving the invariant that admins
 back up personal device data to their own space rather than the whole share.
 
+## iOS BGTask launch-handler registration (required)
+On iOS every `BGTaskSchedulerPermittedIdentifiers` id must have a `BGTaskScheduler` launch
+handler registered **before `application(_:didFinishLaunchingWithOptions:)` returns**, or the
+first `BGTaskScheduler.submit()` aborts the process (native `SIGABRT` — a Dart `try/catch`
+cannot catch it). Because this app uses Flutter's **UIScene lifecycle**
+(`FlutterImplicitEngineDelegate`), plugins register *after* `didFinishLaunching` returns, so
+`workmanager_apple` cannot register the handlers itself in time.
+
+`ios/Runner/AppDelegate.swift` therefore registers a handler for every permitted id (read from
+Info.plist) via `WorkmanagerPlugin.registerPeriodicTask(withIdentifier:)` and then calls
+`WorkmanagerPlugin.registerLaunchHandlers()` for tasks persisted from a previous session. Keep
+this in `didFinishLaunchingWithOptions`; removing it reintroduces the launch crash. If a new
+BGTask id is added, add it to `BGTaskSchedulerPermittedIdentifiers` (the AppDelegate loop picks
+it up automatically).
+
 ## iOS throttling
 Info.plist declares `fetch` and `processing` background modes and permits both BGTask ids.
 Actual iOS execution is OS-throttled and must be validated on a signed Xcode build, not on
