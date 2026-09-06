@@ -71,8 +71,21 @@ production/store build, add a real keystore via `android/key.properties` and rep
 
 ## iOS notes
 The iOS folder is scaffolded and Info.plist includes local network, Bonjour, camera, photo,
-contacts, and BGTask entries. This host is **scaffold-only** for iOS: no full Xcode/signing
-validation. Build and sign iOS on the user's Mac with Xcode.
+contacts, and BGTask entries. **Xcode 16.4 and CocoaPods 1.17 are now installed on the
+build Mac**, so iOS is buildable here (Simulator with no signing; a physical device needs an
+Apple ID team). `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` is exported by
+`~/.localdrive_flutter_env.sh`.
+
+One-time host setup (requires the user's password once — Copilot cannot run `sudo`):
+```bash
+sudo sh -c 'xcode-select -s /Applications/Xcode.app/Contents/Developer && xcodebuild -license accept && xcodebuild -runFirstLaunch'
+```
+
+Simulator build/run (no signing, good for compile validation):
+```bash
+source ~/.localdrive_flutter_env.sh && open -a Simulator
+source ~/.localdrive_flutter_env.sh && flutter run -d iphone   # or: flutter build ios --simulator
+```
 
 Checked-in Xcode project deployment target is `15.0`. If product policy requires iOS 13,
 change and validate it deliberately in Xcode rather than only editing docs.
