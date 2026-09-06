@@ -11,6 +11,7 @@ import '../../state/api_providers.dart';
 import '../../state/session_controller.dart';
 import '../../widgets/status_views.dart';
 import '../auth/account_switcher.dart';
+import 'request_access_sheet.dart';
 
 /// All registered drives with the caller's access state. Refetches when the
 /// admin view mode changes so the list reflects the active scope.
@@ -74,6 +75,37 @@ class _DrivesScreenState extends ConsumerState<DrivesScreen> {
     );
   }
 
+  void _showInfo(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Routes a tap on a drive card based on the caller's access. Drives the user
+  /// can open are opened; otherwise we surface status or offer to request
+  /// access — so tapping a locked drive is never a dead end.
+  void _onTapDrive(DriveInfo drive) {
+    switch (drive.access) {
+      case DriveAccess.granted:
+        if (drive.online) {
+          _openDrive(drive);
+        } else {
+          _showInfo('“${drive.label}” is offline.');
+        }
+      case DriveAccess.pending:
+        _showInfo('Waiting for admin approval of your access request.');
+      case DriveAccess.denied:
+      case DriveAccess.none:
+      case null:
+        _promptRequestAccess(drive);
+    }
+  }
+
+  Future<void> _promptRequestAccess(DriveInfo drive) async {
+    final confirmed = await RequestAccessSheet.show(context, drive);
+    if (confirmed == true) await _requestAccess(drive);
+  }
+
   @override
   Widget build(BuildContext context) {
     final drivesAsync = ref.watch(drivesListProvider);
@@ -127,11 +159,11 @@ class _DrivesScreenState extends ConsumerState<DrivesScreen> {
             child: ListView.builder(
               padding: const EdgeInsets.all(12),
               itemCount: drives.length,
-              itemBuilder: (_, i) => _DriveCard(
+              itemBuilder: (_, i) => DriveCard(
                 drive: drives[i],
                 requesting: _requesting.contains(drives[i].uuid),
-                onOpen: () => _openDrive(drives[i]),
-                onRequest: () => _requestAccess(drives[i]),
+                onTap: () => _onTapDrive(drives[i]),
+                onRequest: () => _promptRequestAccess(drives[i]),
               ),
             ),
           );
@@ -170,33 +202,42 @@ class _ViewModeButton extends StatelessWidget {
   }
 }
 
-class _DriveCard extends StatelessWidget {
-  const _DriveCard({
+class DriveCard extends StatelessWidget {
+  const DriveCard({
+    super.key,
     required this.drive,
     required this.requesting,
-    required this.onOpen,
+    required this.onTap,
     required this.onRequest,
   });
 
   final DriveInfo drive;
   final bool requesting;
-  final VoidCallback onOpen;
+
+  /// Tapping anywhere on the card. The screen decides what to do based on the
+  /// caller's access (open / show status / offer to request access).
+  final VoidCallback onTap;
+
+  /// Explicit "request access" affordance for drives the user can't open yet.
   final VoidCallback onRequest;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final granted = drive.isGranted;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     final subtitle = [
       if (drive.filesystem != null) drive.filesystem!,
       if (drive.totalBytes != null)
         '${formatBytes(drive.usedBytes)} / ${formatBytes(drive.totalBytes)}',
       if (!drive.online) 'Offline',
     ].join(' · ');
+    final requestable = drive.access == DriveAccess.denied ||
+        drive.access == DriveAccess.none ||
+        drive.access == null;
 
     return Card(
       child: InkWell(
-        onTap: granted && drive.online ? onOpen : null,
+        onTap: onTap,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -213,21 +254,24 @@ class _DriveCard extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(drive.label,
-                            style: Theme.of(context).textTheme.titleMedium,
-                            overflow: TextOverflow.ellipsis),
+                        Text(
+                          drive.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.titleMedium,
+                        ),
                         if (subtitle.isNotEmpty)
-                          Text(subtitle,
-                              style: Theme.of(context).textTheme.bodySmall),
+                          Text(
+                            subtitle,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall,
+                          ),
                       ],
                     ),
                   ),
-                  _AccessTrailing(
-                    drive: drive,
-                    requesting: requesting,
-                    onOpen: onOpen,
-                    onRequest: onRequest,
-                  ),
+                  const SizedBox(width: 8),
+                  _AccessStatus(drive: drive),
                 ],
               ),
               if (drive.usedFraction != null) ...[
@@ -241,6 +285,30 @@ class _DriveCard extends StatelessWidget {
                   ),
                 ),
               ],
+              if (requestable) ...[
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    FilledButton.tonalIcon(
+                      onPressed: requesting ? null : onRequest,
+                      icon: requesting
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.lock_open_outlined, size: 18),
+                      label: Text(
+                        drive.access == DriveAccess.denied
+                            ? 'Request again'
+                            : 'Request access',
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
@@ -249,28 +317,16 @@ class _DriveCard extends StatelessWidget {
   }
 }
 
-class _AccessTrailing extends StatelessWidget {
-  const _AccessTrailing({
-    required this.drive,
-    required this.requesting,
-    required this.onOpen,
-    required this.onRequest,
-  });
+/// Compact trailing indicator for a drive card. Intentionally small so it never
+/// squeezes the drive name — the request action lives on its own row below.
+class _AccessStatus extends StatelessWidget {
+  const _AccessStatus({required this.drive});
 
   final DriveInfo drive;
-  final bool requesting;
-  final VoidCallback onOpen;
-  final VoidCallback onRequest;
 
   @override
   Widget build(BuildContext context) {
-    if (requesting) {
-      return const SizedBox(
-        width: 20,
-        height: 20,
-        child: CircularProgressIndicator(strokeWidth: 2),
-      );
-    }
+    final scheme = Theme.of(context).colorScheme;
     switch (drive.access) {
       case DriveAccess.granted:
         return const Icon(Icons.chevron_right);
@@ -282,10 +338,7 @@ class _AccessTrailing extends StatelessWidget {
       case DriveAccess.denied:
       case DriveAccess.none:
       case null:
-        return FilledButton.tonal(
-          onPressed: onRequest,
-          child: const Text('Request'),
-        );
+        return Icon(Icons.lock_outline, color: scheme.outline);
     }
   }
 }

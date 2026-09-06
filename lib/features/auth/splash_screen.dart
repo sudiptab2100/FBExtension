@@ -22,8 +22,8 @@ class SplashScreen extends ConsumerWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.cloud_sync,
-                  size: 64, color: Theme.of(context).colorScheme.primary),
+              Image.asset('assets/branding/localdrive_logo.png',
+                  width: 96, height: 96),
               const SizedBox(height: 16),
               Text('LocalDrive',
                   style: Theme.of(context).textTheme.headlineSmall),

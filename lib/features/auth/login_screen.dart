@@ -137,9 +137,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Icon(Icons.cloud,
-                        size: 56,
-                        color: Theme.of(context).colorScheme.primary),
+                    Image.asset('assets/branding/localdrive_logo.png',
+                        width: 72, height: 72),
                     const SizedBox(height: 12),
                     Text(
                       active?.name ?? 'LocalDrive',
