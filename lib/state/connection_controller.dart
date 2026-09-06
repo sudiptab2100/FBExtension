@@ -1,0 +1,114 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../core/storage/prefs.dart';
+import '../data/models/ld_instance.dart';
+import 'core_providers.dart';
+
+/// The set of known servers plus which one is active.
+class ConnectionState {
+  const ConnectionState({this.instances = const [], this.activeId});
+
+  final List<LdInstance> instances;
+  final String? activeId;
+
+  LdInstance? get active {
+    if (activeId == null) return null;
+    for (final i in instances) {
+      if (i.id == activeId) return i;
+    }
+    return null;
+  }
+
+  ConnectionState copyWith({
+    List<LdInstance>? instances,
+    String? activeId,
+    bool clearActive = false,
+  }) =>
+      ConnectionState(
+        instances: instances ?? this.instances,
+        activeId: clearActive ? null : (activeId ?? this.activeId),
+      );
+}
+
+/// Owns the saved-server list and the active selection, persisted to [Prefs].
+class ConnectionController extends Notifier<ConnectionState> {
+  @override
+  ConnectionState build() {
+    final prefs = ref.watch(prefsProvider);
+    return ConnectionState(
+      instances: prefs.readInstances(),
+      activeId: prefs.activeInstanceId,
+    );
+  }
+
+  Prefs get _prefs => ref.read(prefsProvider);
+
+  Future<void> _persist() async {
+    await _prefs.writeInstances(state.instances);
+    await _prefs.setActiveInstanceId(state.activeId);
+  }
+
+  /// Add a new instance or merge into an existing one (matched by id), then
+  /// optionally make it active. Returns the stored instance.
+  Future<LdInstance> addOrUpdate(
+    LdInstance instance, {
+    bool activate = false,
+  }) async {
+    final list = [...state.instances];
+    final idx = list.indexWhere((i) => i.id == instance.id);
+    LdInstance stored;
+    if (idx >= 0) {
+      stored = list[idx].copyWith(
+        name: instance.name,
+        hostname: instance.hostname,
+        source: instance.source,
+        trustSelfSigned:
+            instance.trustSelfSigned || list[idx].trustSelfSigned,
+      );
+      list[idx] = stored;
+    } else {
+      stored = instance;
+      list.add(instance);
+    }
+    state = state.copyWith(
+      instances: list,
+      activeId: activate ? stored.id : state.activeId,
+    );
+    await _persist();
+    return stored;
+  }
+
+  Future<void> setActive(String? id) async {
+    state = state.copyWith(activeId: id, clearActive: id == null);
+    await _prefs.setActiveInstanceId(id);
+  }
+
+  Future<void> remove(String id) async {
+    final list = state.instances.where((i) => i.id != id).toList();
+    state = ConnectionState(
+      instances: list,
+      activeId: state.activeId == id ? null : state.activeId,
+    );
+    await _persist();
+    await ref.read(secureStoreProvider).deleteToken(id);
+  }
+
+  Future<void> markConnected(String id) async {
+    final idx = state.instances.indexWhere((i) => i.id == id);
+    if (idx < 0) return;
+    final list = [...state.instances];
+    list[idx] =
+        list[idx].copyWith(lastConnectedAt: DateTime.now().toIso8601String());
+    state = state.copyWith(instances: list);
+    await _persist();
+  }
+}
+
+final connectionControllerProvider =
+    NotifierProvider<ConnectionController, ConnectionState>(
+        ConnectionController.new);
+
+/// The currently active server, or null when none is selected.
+final activeInstanceProvider = Provider<LdInstance?>(
+  (ref) => ref.watch(connectionControllerProvider).active,
+);
