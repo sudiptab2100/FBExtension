@@ -39,6 +39,36 @@ Debug APK validation command:
 source ~/.localdrive_flutter_env.sh && flutter build apk --debug
 ```
 
+### Install on a physical Android device
+Requires **Android 8.0+** (`minSdk 26`). No signing account is needed; the release build is
+debug-signed by the default template, so it installs for testing.
+
+USB (direct install):
+1. On the phone, enable Developer options (**Settings → About phone → tap Build number 7×**)
+   then **Settings → System → Developer options → USB debugging**.
+2. Plug in via USB and approve the **Allow USB debugging** prompt.
+3. Install + run:
+```bash
+source ~/.localdrive_flutter_env.sh && flutter devices        # phone should appear
+source ~/.localdrive_flutter_env.sh && flutter run --release  # build, install, run
+```
+Or install a prebuilt APK straight to the device:
+```bash
+source ~/.localdrive_flutter_env.sh && adb install -r build/app/outputs/flutter-apk/app-release.apk
+```
+
+Sideload (no cable / share to testers): copy `app-release.apk` to the phone (Drive, email, or
+file transfer), open it, allow **Install unknown apps** for the source app, then tap Install.
+
+Shareable release artifact:
+```bash
+source ~/.localdrive_flutter_env.sh && flutter build apk --release
+# -> build/app/outputs/flutter-apk/app-release.apk
+```
+The debug APK (`app-debug.apk`) is much larger; prefer the release APK for distribution. For a
+production/store build, add a real keystore via `android/key.properties` and replace the debug
+`signingConfig` in `android/app/build.gradle.kts`.
+
 ## iOS notes
 The iOS folder is scaffolded and Info.plist includes local network, Bonjour, camera, photo,
 contacts, and BGTask entries. This host is **scaffold-only** for iOS: no full Xcode/signing
