@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/storage/prefs.dart';
 import '../data/models/ld_instance.dart';
+import '../data/services/backup_session_actions.dart';
 import 'core_providers.dart';
 
 /// The set of known servers plus which one is active.
@@ -23,11 +24,10 @@ class ConnectionState {
     List<LdInstance>? instances,
     String? activeId,
     bool clearActive = false,
-  }) =>
-      ConnectionState(
-        instances: instances ?? this.instances,
-        activeId: clearActive ? null : (activeId ?? this.activeId),
-      );
+  }) => ConnectionState(
+    instances: instances ?? this.instances,
+    activeId: clearActive ? null : (activeId ?? this.activeId),
+  );
 }
 
 /// Owns the saved-server list and the active selection, persisted to [Prefs].
@@ -61,17 +61,18 @@ class ConnectionController extends Notifier<ConnectionState> {
       stored = list[idx].copyWith(
         name: instance.name,
         hostname: instance.hostname,
-        addresses:
-            instance.addresses.isNotEmpty ? instance.addresses : null,
+        addresses: instance.addresses.isNotEmpty ? instance.addresses : null,
         httpsPort: instance.httpsPort,
         source: instance.source,
-        trustSelfSigned:
-            instance.trustSelfSigned || list[idx].trustSelfSigned,
+        trustSelfSigned: instance.trustSelfSigned || list[idx].trustSelfSigned,
       );
       list[idx] = stored;
     } else {
       stored = instance;
       list.add(instance);
+    }
+    if (activate && stored.id != state.activeId) {
+      await _pauseActiveBackup();
     }
     state = state.copyWith(
       instances: list,
@@ -82,11 +83,25 @@ class ConnectionController extends Notifier<ConnectionState> {
   }
 
   Future<void> setActive(String? id) async {
+    if (id == state.activeId) return;
+    await _pauseActiveBackup();
     state = state.copyWith(activeId: id, clearActive: id == null);
     await _prefs.setActiveInstanceId(id);
   }
 
   Future<void> remove(String id) async {
+    for (final account in _prefs.accounts(id)) {
+      await stopAccountBackup(
+        prefs: _prefs,
+        instanceId: id,
+        userId: account.userId,
+        discard: true,
+        blockNewWork: true,
+        invalidateSession:
+            state.activeId == id &&
+            _prefs.activeAccount(id) == account.username,
+      );
+    }
     final list = state.instances.where((i) => i.id != id).toList();
     state = ConnectionState(
       instances: list,
@@ -103,16 +118,36 @@ class ConnectionController extends Notifier<ConnectionState> {
     final idx = state.instances.indexWhere((i) => i.id == id);
     if (idx < 0) return;
     final list = [...state.instances];
-    list[idx] =
-        list[idx].copyWith(lastConnectedAt: DateTime.now().toIso8601String());
+    list[idx] = list[idx].copyWith(
+      lastConnectedAt: DateTime.now().toIso8601String(),
+    );
     state = state.copyWith(instances: list);
     await _persist();
+  }
+
+  Future<void> _pauseActiveBackup() async {
+    final id = state.activeId;
+    if (id == null) {
+      await _prefs.invalidateBackupSession();
+      return;
+    }
+    final username = _prefs.activeAccount(id);
+    final account = _prefs
+        .accounts(id)
+        .where((value) => value.username == username)
+        .firstOrNull;
+    await stopAccountBackup(
+      prefs: _prefs,
+      instanceId: id,
+      userId: account?.userId,
+    );
   }
 }
 
 final connectionControllerProvider =
     NotifierProvider<ConnectionController, ConnectionState>(
-        ConnectionController.new);
+      ConnectionController.new,
+    );
 
 /// The currently active server, or null when none is selected.
 final activeInstanceProvider = Provider<LdInstance?>(

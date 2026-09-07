@@ -15,6 +15,7 @@ void main() {
       );
       final acc = Account.fromUser(user);
       expect(acc.username, 'alice');
+      expect(acc.userId, 7);
       expect(acc.role, UserRole.user);
       expect(acc.isAdmin, isFalse);
       expect(acc.label, 'alice');
@@ -39,6 +40,7 @@ void main() {
         role: UserRole.admin,
         addedAt: '2026-02-02T00:00:00.000',
         displayName: 'Bobby',
+        userId: 9,
       );
       final restored = Account.fromJson(acc.toJson());
       expect(restored.username, 'bob');
@@ -46,6 +48,7 @@ void main() {
       expect(restored.addedAt, '2026-02-02T00:00:00.000');
       expect(restored.displayName, 'Bobby');
       expect(restored.label, 'Bobby');
+      expect(restored.userId, 9);
     });
 
     test('copyWith updates role but keeps identity', () {
@@ -53,11 +56,26 @@ void main() {
         username: 'carol',
         role: UserRole.user,
         addedAt: 't',
+        userId: 11,
       );
       final promoted = acc.copyWith(role: UserRole.admin);
       expect(promoted.username, 'carol');
       expect(promoted.role, UserRole.admin);
       expect(promoted.addedAt, 't');
+      expect(promoted.userId, 11);
     });
+
+    test(
+      'legacy accounts remain unverified until a server identity is learned',
+      () {
+        final account = Account.fromJson({
+          'username': 'alice',
+          'role': 'user',
+          'addedAt': 't',
+        });
+        expect(account.userId, isNull);
+        expect(account.copyWith(userId: 7).userId, 7);
+      },
+    );
   });
 }

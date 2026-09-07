@@ -1,9 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/config/constants.dart';
+import '../../core/network/dio_client.dart';
 import '../../data/models/drive_info.dart';
 import '../../data/models/file_entry.dart';
+import '../../data/repositories/drives_repository.dart';
+import '../../data/repositories/files_repository.dart';
 import '../../state/api_providers.dart';
+import '../../state/connection_controller.dart' show activeInstanceProvider;
+import '../../state/session_controller.dart';
 import '../drives/drives_screen.dart';
 
 /// A chosen upload target: a granted [drive] and a scope-relative folder [path].
@@ -24,21 +30,57 @@ class DestinationChoice {
 
 /// Presents a bottom sheet to pick a granted drive and a destination folder.
 /// Returns `null` if the user dismisses without choosing.
-Future<DestinationChoice?> showDestinationPicker(BuildContext context) {
-  return showModalBottomSheet<DestinationChoice>(
-    context: context,
-    isScrollControlled: true,
-    showDragHandle: true,
-    useSafeArea: true,
-    builder: (_) => const FractionallySizedBox(
-      heightFactor: 0.85,
-      child: _DestinationPickerSheet(),
-    ),
-  );
+Future<DestinationChoice?> showDestinationPicker(
+  BuildContext context, {
+  bool userSpace = false,
+}) async {
+  final container = ProviderScope.containerOf(context, listen: false);
+  final instance = container.read(activeInstanceProvider);
+  final session = container.read(sessionControllerProvider);
+  if (userSpace &&
+      (instance == null || !session.isAuthenticated || session.token == null)) {
+    return null;
+  }
+  final scopedDio = userSpace
+      ? buildDio(
+          baseUrl: instance!.baseUrl,
+          token: () => session.token,
+          viewMode: () => ViewCookie.user,
+          trustSelfSigned: instance.trustSelfSigned,
+        )
+      : null;
+  try {
+    return await showModalBottomSheet<DestinationChoice>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (_) => ProviderScope(
+        overrides: [
+          if (scopedDio != null) ...[
+            filesRepositoryProvider.overrideWithValue(
+              FilesRepository(scopedDio),
+            ),
+            drivesListProvider.overrideWith(
+              (ref) => DrivesRepository(scopedDio).list(),
+            ),
+          ],
+        ],
+        child: FractionallySizedBox(
+          heightFactor: 0.85,
+          child: _DestinationPickerSheet(userSpace: userSpace),
+        ),
+      ),
+    );
+  } finally {
+    scopedDio?.close(force: true);
+  }
 }
 
 class _DestinationPickerSheet extends ConsumerStatefulWidget {
-  const _DestinationPickerSheet();
+  const _DestinationPickerSheet({this.userSpace = false});
+
+  final bool userSpace;
 
   @override
   ConsumerState<_DestinationPickerSheet> createState() =>
@@ -51,9 +93,9 @@ class _DestinationPickerSheetState
   String _path = '';
 
   void _openDrive(DriveInfo d) => setState(() {
-        _drive = d;
-        _path = '';
-      });
+    _drive = d;
+    _path = '';
+  });
 
   void _enter(String folderPath) => setState(() => _path = folderPath);
 
@@ -69,8 +111,12 @@ class _DestinationPickerSheetState
         _Header(
           title: _drive == null ? 'Choose a drive' : _drive!.label,
           subtitle: _drive == null
-              ? 'Upload destination'
-              : (_path.isEmpty ? 'Drive root' : _path),
+              ? (widget.userSpace
+                    ? 'Personal backup destination'
+                    : 'Upload destination')
+              : (_path.isEmpty
+                    ? (widget.userSpace ? 'My space' : 'Drive root')
+                    : _path),
           onBack: _drive == null
               ? null
               : () {
@@ -82,21 +128,24 @@ class _DestinationPickerSheetState
                 },
         ),
         const Divider(height: 1),
-        Expanded(
-          child: _drive == null ? _driveList() : _folderList(),
-        ),
+        Expanded(child: _drive == null ? _driveList() : _folderList()),
         if (_drive != null)
           SafeArea(
             top: false,
             child: Padding(
               padding: const EdgeInsets.all(12),
               child: FilledButton.icon(
-                style:
-                    FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48),
+                ),
                 icon: const Icon(Icons.check),
-                label: Text(_path.isEmpty
-                    ? 'Upload here (drive root)'
-                    : 'Upload to “${_path.split('/').last}”'),
+                label: Text(
+                  _path.isEmpty
+                      ? (widget.userSpace
+                            ? 'Back up here (my space)'
+                            : 'Upload here (drive root)')
+                      : 'Upload to “${_path.split('/').last}”',
+                ),
                 onPressed: () => Navigator.pop(
                   context,
                   DestinationChoice(
@@ -125,7 +174,8 @@ class _DestinationPickerSheetState
         if (granted.isEmpty) {
           return const _Message(
             icon: Icons.lock_outline,
-            text: 'No drives you can upload to yet.\nRequest access from the '
+            text:
+                'No drives you can upload to yet.\nRequest access from the '
                 'Drives tab first.',
           );
         }
@@ -163,14 +213,15 @@ class _DestinationPickerSheetState
             text: 'Could not open folder.\n${snap.error}',
           );
         }
-        final folders =
-            (snap.data ?? const []).where((e) => e.isDir).toList()
-              ..sort((a, b) =>
-                  a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        final folders = (snap.data ?? const []).where((e) => e.isDir).toList()
+          ..sort(
+            (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+          );
         if (folders.isEmpty) {
           return const _Message(
             icon: Icons.folder_open_outlined,
-            text: 'No sub-folders here.\nUpload into this folder using the '
+            text:
+                'No sub-folders here.\nUpload into this folder using the '
                 'button below.',
           );
         }
@@ -192,11 +243,7 @@ class _DestinationPickerSheetState
 }
 
 class _Header extends StatelessWidget {
-  const _Header({
-    required this.title,
-    required this.subtitle,
-    this.onBack,
-  });
+  const _Header({required this.title, required this.subtitle, this.onBack});
 
   final String title;
   final String subtitle;
@@ -216,14 +263,18 @@ class _Header extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
-                    style: Theme.of(context).textTheme.titleMedium,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-                Text(subtitle,
-                    style: Theme.of(context).textTheme.bodySmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
+                Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleMedium,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  subtitle,
+                  style: Theme.of(context).textTheme.bodySmall,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ],
             ),
           ),

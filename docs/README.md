@@ -10,15 +10,17 @@ A concise engineer/AI reference for the Flutter mobile client of LocalDrive-Mast
 LocalDrive-App is a Flutter mobile client for LocalDrive-Master. It discovers LAN servers,
 connects by QR/manual entry/saved instance, signs in with LocalDrive accounts, browses
 opt-in drives, manages files, uploads device media/files/contacts, exposes an admin console
-for admins, receives live/background notifications, and can periodically auto-back up device
-photos, videos, and contacts.
+for admins, receives live/background notifications, and backs up device photos, videos,
+and contacts through account-isolated durable jobs. iOS combines OS-scheduled preparation
+with native background transfers; Android retains WorkManager scheduling.
 
 ## Reading order
 1. [architecture.md](architecture.md) — runtime layers, data flow, Riverpod graph, Dio, isolates.
 2. [project-structure.md](project-structure.md) — annotated `lib/` tree.
 3. [api-integration.md](api-integration.md) — exact HTTP paths from `Api.*` constants.
 4. [connectivity-discovery.md](connectivity-discovery.md) — mDNS, QR/manual connect, saved instances, TLS trust.
-5. [notifications-backup.md](notifications-backup.md) — SSE, WorkManager polling, local notifications, auto-backup.
+5. [notifications-backup.md](notifications-backup.md) — durable backup, native iOS transfers,
+   scheduling/policy limits, SSE, polling, and notifications.
 6. [permissions.md](permissions.md) — Android manifest and iOS Info.plist permissions.
 7. [state-management.md](state-management.md) — Riverpod providers/controllers and state flow.
 8. [build-run.md](build-run.md) — host commands and platform limitations.
@@ -37,9 +39,10 @@ photos, videos, and contacts.
 | HTTP | `dio ^5.11.1`, tus uploads via `tus_client ^1.0.2` |
 | Default server ports | HTTP `4820`, HTTPS `4843` |
 | Discovery services | `_localdrive._tcp`, `_http._tcp` filtered by name `LocalDrive` |
-| Local stores | secure storage tokens, shared preferences, sqflite `localdrive.db` |
+| Local stores | per-account secure tokens/preferences; schema-v3 sqflite jobs/ledger; native iOS task journal |
 | Android minimum | API 26 |
-| iOS scaffold target in repo | deployment target `15.0` in `ios/Runner.xcodeproj`; Info.plist has Local Network/BGTask entries |
+| iOS minimum | 15.0; signed physical-device builds with native BGProcessing/URLSession integration |
+| Recoverable backup | tus `/api/upload` plus owner-scoped `/api/backup/uploads/:jobId`; capability `backgroundBackupTus = 1` |
 
 ## Keeping this KB accurate
 When code changes behavior, update the affected page. The highest-value pages to keep in

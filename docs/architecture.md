@@ -1,76 +1,92 @@
 # Architecture
 
-LocalDrive-App is a Flutter client layered around Riverpod state, Dio repositories, and platform services.
+LocalDrive-App is a Flutter client layered around Riverpod state, HTTP repositories,
+durable account-owned storage, and platform services. The server remains in the
+separate LocalDrive-Master repository.
 
 ## Runtime layers
 | Layer | Code | Responsibility |
 | --- | --- | --- |
-| Boot/root | `lib/main.dart`, `lib/app.dart` | Initialize Flutter, load `Prefs`, initialize notifications/WorkManager, keep live SSE mounted, render `MaterialApp.router`. |
-| Routing | `lib/routing/router.dart` | `go_router` routes plus redirects for no active server, session restore, unauthenticated login, and authenticated home. |
-| State | `lib/state/*` | Riverpod controllers for connection, session, settings, live events, backup settings/runs. |
-| Repositories | `lib/data/repositories/*` | Thin REST wrappers over LocalDrive-Master HTTP API. |
-| Network | `lib/core/network/*` | Dio construction, auth/view-mode interceptors, SSE parsing, normalized `ApiException`. |
-| Platform services | `lib/data/services/*` | mDNS, tus uploads, local notifications, WorkManager, gallery/contacts, backup engine. |
-| UI features | `lib/features/*` | Connect/auth shell, drives/files/device/backup/settings/admin screens. |
-| Storage | `lib/core/storage/*` | Secure JWT store, shared preferences, sqflite backup ledger/upload queue. |
+| Boot/root | `lib/main.dart`, `lib/app.dart` | Initialize services, mount routing/SSE, observe lifecycle and power/network changes, reconcile scheduling and catch-up. |
+| Routing | `lib/routing/router.dart` | Redirect between server selection, session restore, login and authenticated home. |
+| State | `lib/state/*` | Active server/account, settings, live events, backup preparation and persisted progress. |
+| Repositories | `lib/data/repositories/*` | Thin REST wrappers over LocalDrive-Master. |
+| Network | `lib/core/network/*` | Dio, scoped authentication/view mode, SSE parsing and normalized failures. |
+| Backup services | `lib/data/services/backup_*.dart` | Eligibility, owned staging, durable jobs, tus recovery and reconciliation. |
+| Native iOS | `ios/Runner/BackgroundUpload*.swift`, `AppDelegate.swift` | Stable background URLSessions, protected staging/journal, BGTask registration and headless plugins. |
+| UI | `lib/features/*` | Connect/auth, drives/files/device/backup/settings/admin surfaces. |
+| Storage | `lib/core/storage/*` | Secure account tokens, preferences and schema-v3 sqflite jobs/ledger. |
 
 ## Data flow
-1. `main()` loads `Prefs` before first frame and overrides `prefsProvider`.
-2. `ConnectionController` reads saved `LdInstance`s and the active instance id.
-3. `SessionController` reacts to the active instance, reads its secure token, then probes
-   `GET /api/auth/me` to restore the user.
-4. `routerProvider` listens to connection/session state and redirects:
-   `connect → splash/login → home`.
-5. Feature screens watch repository-backed providers (`drivesListProvider`,
-   `fileListProvider`, admin providers). Repositories call Dio using `Api.*` paths.
-6. Dio injects `Authorization: Bearer <token>` and, for admins, `Cookie: ld_view=<mode>`.
-7. Server responses are parsed into models; mutations invalidate affected FutureProviders.
+1. `main()` loads `Prefs` and overrides `prefsProvider`.
+2. `ConnectionController` resolves the selected saved server.
+3. `SessionController` reads the selected account's secure token, verifies `/api/auth/me`,
+   and persists the server user ID. Authentication changes are serialized and fenced.
+4. The router selects `connect -> splash/login -> home`.
+5. Feature providers call repositories using the active server and account.
+6. Dio adds the authorization header and current admin browsing scope. Backups use a
+   captured identity and force `ld_view=user`, independent of the file browser's view.
+7. Successful mutations invalidate the appropriate providers. Account switches pause
+   old-account backup before replacing credentials or submitting new-account work.
 
-## Riverpod graph (core)
+## Riverpod graph
 | Provider | Depends on | Used by |
 | --- | --- | --- |
-| `prefsProvider` | `Prefs` override in `main()` | connection/session/settings/backup/background cursors. |
-| `secureStoreProvider` | `FlutterSecureStorage` | per-instance JWT read/write/delete. |
-| `connectionControllerProvider` | `Prefs` | active server list, router redirects, Dio base URL. |
-| `activeInstanceProvider` | connection state | Dio, connect/session/upload/backup. |
-| `sessionControllerProvider` | active instance, secure store, auth repo, prefs | auth restore, login/register/logout, admin view mode. |
-| `dioProvider` | active instance, session token/view mode | all REST repositories. |
-| `authHeadersProvider` | session state | thumbnails/previews/uploads outside Dio. |
-| `liveEventsProvider` | active instance, session, Dio | app-wide `/api/events/user` subscription. |
-| `backupSettingsProvider` | `Prefs` | Backup tab and WorkManager backup registration. |
-| `backupRunnerProvider` | backup settings, upload/media/db | foreground backup run. |
+| `prefsProvider` | Boot override | Saved servers/accounts, settings, generation fences and cursors. |
+| `secureStoreProvider` | `FlutterSecureStorage` | Per-account Keychain/Keystore tokens. |
+| `localDbProvider` | `LocalDb.open()` | Lazy shared database opening and backup persistence. |
+| `activeInstanceProvider` | Connection state | Routing, HTTP and account selection. |
+| `sessionControllerProvider` | Active server, secure store, preferences | Restore/login/switch/logout and view mode. |
+| `dioProvider` | Server and current session | Ordinary REST repositories. |
+| `authHeadersProvider` | Session | Thumbnails/previews and ordinary uploads. |
+| `liveEventsProvider` | Server, session and Dio | User-scoped SSE subscription. |
+| `backupSettingsProvider` | Selected verified account and preferences | Account-owned configuration and scheduling. |
+| `backupCoordinatorProvider` | Local database and platform services | Durable preparation, transfer and reconciliation. |
+| `backupRunnerProvider` | Captured context, coordinator and settings | Manual/automatic catch-up and visible progress. |
 
-## Dio client
-`buildDio()` in `lib/core/network/dio_client.dart` binds one `Dio` instance to a server
-base URL. It configures:
-- connect/receive/send timeouts;
-- bearer auth from a lazy token provider;
-- `ld_view` cookie from a lazy admin view-mode provider;
-- optional `IOHttpClientAdapter.badCertificateCallback` for user-approved self-signed TLS;
-- a 401 callback that calls `SessionController.handleUnauthorized()`.
+## Network and authentication
+`buildDio()` configures timeouts, lazy authorization/view-mode headers, and explicitly
+approved per-instance self-signed TLS. A delayed 401 from an old token must not evict
+a replacement session. Public login/registration cannot borrow another account's token.
 
-Binary endpoints use the same Dio instance for downloads. Image thumbnails/previews and tus
-uploads need explicit headers from `authHeadersProvider` because they run outside normal Dio
-JSON calls.
+Ordinary file uploads retain `UploadService` and tus. Recoverable backups instead use
+`BackupTusService` to create/recover a stable job, obtain the authoritative offset, and
+verify the owner-scoped server receipt. Native upload URLs must stay on the approved
+origin and canonical nonredirecting tus endpoint.
 
-## SSE and isolates
-Foreground live events run in the UI isolate: `LocalDriveApp` watches `liveEventsProvider`,
-which opens a streamed Dio request to `/api/events/user` while authenticated.
+## Background execution
+Foreground SSE stays in the UI isolate. WorkManager dispatches refresh/backup through
+`background_service.dart` without Riverpod; headless code reloads preferences and
+resolves the selected account's current secure token through `background_session.dart`.
 
-Background work runs in a WorkManager background isolate through `backgroundDispatcher()` in
-`background_service.dart`. That isolate must not touch Riverpod; it reads
-`SharedPreferences` and `FlutterSecureStorage` directly, reconstructs `LdInstance`s, builds
-throwaway Dio/upload clients, and calls either `_pollChanges()` or `runHeadlessBackup()`.
+iOS registers BGProcessing for preparation, resubmits one-shot work before it can
+expire, and hands staged suffix files to native background URLSession. Native events
+survive Flutter suspension and are read non-destructively: commit the SQLite
+queue/ledger update before ACK. Android retains periodic WorkManager scheduling and
+the Dart transfer path. Foreground launch/resume and network/power changes provide
+catch-up on both platforms.
+
+Preparation requires the configured network/charging policy, permissions, active
+account and destination access. Manual backup bypasses charging only. iOS controls
+execution windows, and force-quit prevents automatic relaunch until reopen.
 
 ## Local database
-`LocalDb.open()` creates `localdrive.db` with:
+`LocalDb.open()` configures WAL and a 5000 ms busy timeout before additive migration to
+schema version 3. Both setters return rows and use `rawQuery` on Darwin.
+
 | Table | Purpose |
 | --- | --- |
-| `backup_ledger` | Dedupe records keyed by unique `(instance_id, asset_id)`. |
-| `upload_queue` | Future-ready persistent queue with tus URL/status fields; current UI uploads run immediately. |
+| `backup_ledger` | Owned successes deduped by profile, destination and source; legacy unowned rows remain separate. |
+| `upload_queue` | Durable logical jobs, immutable ownership/source, staged paths, tus offsets and retry state. |
+| `backup_locks` | Transactional leases coordinating foreground/headless work. |
+| `backup_profile_state` | Destination/source scan state, last attempt/success and waiting/error status. |
+| `backup_attempts` | Per-attempt transport identity and outcome. |
+| `backup_native_events` | Idempotent native-event commits before acknowledgement. |
 
-## App lifecycle notes
-- Notifications and WorkManager initialization are best-effort and never block startup.
-- WorkManager change polling is registered only when notifications are enabled.
-- Backup periodic work is registered only when `BackupSettings.runnable` is true.
-- Admin backups force `ld_view=user` so device data lands in the admin's own space.
+Native iOS owns OS task identities/events, not the logical ledger. Its journal and
+staging use protected app-owned directories; credentials remain only in secure storage
+and transport requests. Do not reset the database or skip account-transition guards
+to hide a storage error.
+
+See [state-management.md](state-management.md), [notifications-backup.md](notifications-backup.md)
+and [api-integration.md](api-integration.md) for the detailed contracts.

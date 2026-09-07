@@ -31,8 +31,8 @@ enabled, periodic refresh work is registered as:
 
 The background isolate runs `_pollChanges()` without Riverpod:
 1. reads `ld.instances` from SharedPreferences;
-2. reads each instance token from secure storage (`ld.token.<id>`);
-3. reads per-instance cursor `ld.change_cursor.<id>`;
+2. resolves each instance's selected verified account and its per-account secure token;
+3. reads a cursor scoped to the instance and server user ID;
 4. calls `GET /api/changes` or `GET /api/changes?since=<cursor>`;
 5. stores the returned cursor;
 6. posts notifications only when notifications are enabled and this is not the first poll.
@@ -51,52 +51,102 @@ The Settings toggle uses `notificationsEnabledProvider`, persisted as
 `ld.notifications_enabled`. Turning it on requests OS notification permission and enables
 change polling; turning it off cancels refresh work and gates all posting paths.
 
-## Auto-backup settings
-`BackupSettings` is stored as JSON under `ld.backup_settings`:
+## Account-owned auto-backup settings
+`BackupSettings` is stored under `ld.backup_profile.<profileId>`, where profileId
+is the JSON tuple `[instanceId, userId]`. Only the active server/account can prepare
+or resume automatic backups. Switching users pauses the old account's work;
+signing out cancels its queued work before removing credentials.
+
+The old global `ld.backup_settings` record is retained for explicit import. It is
+not silently assigned to the currently selected account. Imported settings remain
+disabled until the user reviews the destination and enables automatic backup.
+
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Master auto-backup switch. |
 | `photos` | `true` | Include image assets. |
 | `videos` | `true` | Include video assets. |
 | `contacts` | `false` | Include a daily contacts vCard. |
-| `wifiOnly` | `true` | Register background backup with unmetered-network constraint. |
+| `wifiOnly` | `true` | Require Wi-Fi/wired LAN during preparation; native transfers disallow cellular. |
+| `chargingOnly` | `true` | Start automatic preparation only while charging, including on-open catch-up. |
 | `driveUuid` / `driveLabel` | `null` | Destination drive. |
 | `folder` | `Backup` | Base destination folder. |
 
 `settings.runnable` is true only when enabled, destination is set, and at least one source is
 selected.
 
-## Backup engine
-`BackupEngine` is pure of Riverpod so it can run in UI and background isolates. It:
-- requests gallery/contact access through `MediaService`;
-- enumerates the all-media album in pages of 100 for photos/videos;
-- exports contacts once per day as `contacts-YYYY-MM-DD.vcf`;
-- dedupes with `LocalDb.backup_ledger` unique `(instance_id, asset_id)`;
-- uploads via tus `/api/upload` with metadata `filename`, `drive`, `path`;
-- writes photos to `<folder>/Photos`, videos to `<folder>/Videos`, contacts to
-  `<folder>/Contacts`;
-- marks successful uploads in the ledger with remote drive/path.
+## Durable backup pipeline
+`BackupCoordinator` is usable without Riverpod in both UI and WorkManager engines.
+Its LocalDb queue and ledger are scoped by verified account and destination, not
+only instance/asset. Historical unowned ledger rows are retained rather than
+credited to another account. A job keeps a stable ID, immutable source metadata,
+tus resource/offset, staged path, retry state and transfer attempt identity.
 
-## Foreground backup
-`BackupRunner` powers **Back up now**. It validates destination/source, forces:
+Sources remain photos, videos, and a daily contacts vCard. Files land in
+`<folder>/Photos`, `<folder>/Videos` and `<folder>/Contacts`. Permission dialogs are
+foreground-only. A background worker checks existing grants and defers unavailable
+media; denied permissions or an unavailable iCloud original are not a successful scan.
+
+Both manual and automatic backup force:
 ```text
 Cookie: ld_view=user
 ```
-then creates `BackupEngine` with live progress counts (`uploaded`, `skipped`, `failed`,
-`current`). A successful run with uploaded items may post a backup notification.
+The backup destination picker uses that same personal scope even for an admin
+viewing the whole share elsewhere. Picking a backup folder does not change the
+file browser's view mode.
+
+**Back up now** bypasses charging, but not Wi-Fi or authorization. Launch/resume and
+foreground network/power changes trigger eligible catch-up, with persisted debounce
+and retry backoff. A session generation and unique queue claims prevent old-account
+or simultaneous foreground/headless work from being submitted twice.
+
+## iOS native transfers
+Background processing prepares a bounded batch in owned Application Support
+staging. A native background URLSession uploads file-backed tus PATCH requests.
+Transfers do not depend on keeping a Dart isolate alive. Source files remain
+available until reconciliation; retries can stage the untransferred suffix.
+
+Before retrying, recover the server job receipt and query HEAD for the actual tus
+offset. LocalDrive-Master advertises `capabilities.backgroundBackupTus = 1` and
+provides `GET /api/backup/uploads/:jobId`. This distinguishes an interrupted upload
+from a completed file whose success response was lost. There is no second whole-file
+upload protocol. Older servers use the foreground-only compatibility path and show
+that a server update is required for recoverable native transfers.
+
+The app-local native plugin is registered with both Flutter engines. It shares
+stable sessions, persists nonsecret native completion events, and restores sessions
+on launch. Dart reads events, commits idempotent queue/ledger changes, then
+acknowledges them; events are not destructively drained before database commit.
+Only confirmed server completion counts as backed up, never mere enqueueing.
+
+The Backup screen shows actual queued/uploading/paused/failed states, last attempt
+and last successful backup, including waiting-for-charging/Wi-Fi/server reasons.
+Foreground catch-up resumes queued or paused jobs even when a full batch is already
+pending; the coordinator, rather than the screen's timer, owns preparation limits.
+Completion notifications are currently posted when the foreground reconciler
+confirms a fully completed scan. A native transfer can finish while the app is
+backgrounded without immediately displaying a completion notification.
 
 ## Headless/background backup
-`runHeadlessBackup()` is the WorkManager backup entry point. It reads persisted settings,
-active instance, saved instances, and secure token directly. It no-ops if anything is
-missing or `settings.runnable` is false. Backup work is registered as:
+`runHeadlessBackup()` reads fresh preferences and the selected account through
+`background_session.dart`, not the obsolete single-token-per-instance key.
+Background feature tokens use iOS Keychain access after first unlock on this
+device. The accessibility migration updates attributes atomically while unlocked;
+rewriting a token value alone does not change its protection.
+
+Scheduling is platform-specific:
 | Constant | Value |
 | --- | --- |
 | `BgTasks.backup` | `com.sudiptab2100.localdrive_app.backup` |
-| Period | 1 hour |
-| Constraint | unmetered when `wifiOnly`, otherwise connected |
+| iOS | One-shot BGProcessingTask; hourly earliest-start hint, not an exact interval. |
+| Android | Periodic WorkManager task, hourly interval. |
+| iOS constraints | Connected network plus external power when chargingOnly. Wi-Fi is enforced separately. |
+| Android constraints | Unmetered when wifiOnly, otherwise connected; charging when enabled. |
 
-The headless upload client also forces `ld_view=user`, preserving the invariant that admins
-back up personal device data to their own space rather than the whole share.
+The iOS request is resubmitted at the start of a background wake, before expirable
+work, and reconciled on lifecycle/settings/account changes. Scheduling failures
+are visible. The pinned Apple workmanager implementation does not translate
+`unmetered` into `requiresNetworkConnectivity`, so iOS scheduling uses `connected`.
 
 ## iOS BGTask launch-handler registration (required)
 On iOS every `BGTaskSchedulerPermittedIdentifiers` id must have a `BGTaskScheduler` launch
@@ -106,14 +156,21 @@ cannot catch it). Because this app uses Flutter's **UIScene lifecycle**
 (`FlutterImplicitEngineDelegate`), plugins register *after* `didFinishLaunching` returns, so
 `workmanager_apple` cannot register the handlers itself in time.
 
-`ios/Runner/AppDelegate.swift` therefore registers a handler for every permitted id (read from
-Info.plist) via `WorkmanagerPlugin.registerPeriodicTask(withIdentifier:)` and then calls
-`WorkmanagerPlugin.registerLaunchHandlers()` for tasks persisted from a previous session. Keep
-this in `didFinishLaunchingWithOptions`; removing it reintroduces the launch crash. If a new
-BGTask id is added, add it to `BGTaskSchedulerPermittedIdentifiers` (the AppDelegate loop picks
-it up automatically).
+AppDelegate therefore registers the backup identifier as processing and the refresh
+identifier as refresh, before launch returns. It also sets Workmanager's plugin
+registrant callback for the separate headless engine. Keep that early registration
+and the existing UIScene/implicit-engine integration; removing either can reintroduce
+a startup crash or missing-plugin failures.
 
-## iOS throttling
-Info.plist declares `fetch` and `processing` background modes and permits both BGTask ids.
-Actual iOS execution is OS-throttled and must be validated on a signed Xcode build, not on
-this scaffold-only host.
+## iOS limitations
+iOS decides when background scanning runs. Background App Refresh restrictions,
+Low Power Mode, permissions, and a device not yet unlocked after reboot can defer
+work. The Mac must be awake/reachable and the external drive mounted.
+
+Native transfers may continue while the screen is locked or after system termination.
+**Force-quitting from the app switcher cancels them and prevents automatic relaunch
+until LocalDrive is opened again.** A charging-only setting controls preparation/
+handoff; already handed-off transfers may finish after unplugging.
+
+Use a signed release on a physical iPhone to observe suspension and transfer recovery.
+A debugger-triggered processing task exercises the handler, not iOS's natural scheduling.

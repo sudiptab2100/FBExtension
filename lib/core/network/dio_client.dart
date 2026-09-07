@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 
+import '../config/constants.dart';
+
 /// Returns the current bearer token for the active instance, or null.
 typedef TokenProvider = String? Function();
 
@@ -54,15 +56,21 @@ Dio buildDio({
           // The server derives an admin's scope from the ld_view cookie
           // (see LocalDrive-Master src/server/http/scope.ts).
           final existing = options.headers['Cookie'];
-          options.headers['Cookie'] =
-              existing is String && existing.isNotEmpty
-                  ? '$existing; ld_view=$vm'
-                  : 'ld_view=$vm';
+          options.headers['Cookie'] = existing is String && existing.isNotEmpty
+              ? '$existing; ld_view=$vm'
+              : 'ld_view=$vm';
         }
         handler.next(options);
       },
       onError: (e, handler) {
-        if (e.response?.statusCode == 401) {
+        final current = token();
+        final rejected = e.requestOptions.headers['Authorization'];
+        final path = Uri.tryParse(e.requestOptions.path)?.path;
+        if (e.response?.statusCode == 401 &&
+            path != Api.login &&
+            path != Api.register &&
+            current != null &&
+            rejected == 'Bearer $current') {
           onUnauthorized?.call();
         }
         handler.next(e);

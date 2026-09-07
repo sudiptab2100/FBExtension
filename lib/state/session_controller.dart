@@ -1,11 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/config/constants.dart';
 import '../core/network/api_exception.dart';
+import '../core/network/dio_client.dart';
 import '../data/models/account.dart';
 import '../data/models/ld_instance.dart';
 import '../data/models/user.dart';
 import '../data/repositories/auth_repository.dart';
+import '../data/services/backup_errors.dart';
+import '../data/services/backup_session_actions.dart';
 import 'api_providers.dart';
 import 'connection_controller.dart';
 import 'core_providers.dart';
@@ -52,21 +57,24 @@ class SessionState {
     String? message,
     List<Account>? accounts,
     bool clearMessage = false,
-  }) =>
-      SessionState(
-        status: status ?? this.status,
-        user: user ?? this.user,
-        token: token ?? this.token,
-        viewMode: viewMode ?? this.viewMode,
-        message: clearMessage ? null : (message ?? this.message),
-        accounts: accounts ?? this.accounts,
-      );
+  }) => SessionState(
+    status: status ?? this.status,
+    user: user ?? this.user,
+    token: token ?? this.token,
+    viewMode: viewMode ?? this.viewMode,
+    message: clearMessage ? null : (message ?? this.message),
+    accounts: accounts ?? this.accounts,
+  );
 }
 
 /// Manages login/register/logout, session restore, and multi-account switching
 /// for the active instance. Several users can stay signed in on the same server
 /// (a token is kept per username) and be switched without re-entering passwords.
 class SessionController extends Notifier<SessionState> {
+  bool _checkingSwitchedAccount = false;
+  Future<void> _credentialMutations = Future<void>.value();
+  int _restoreRevision = 0;
+
   @override
   SessionState build() {
     final active = ref.watch(activeInstanceProvider);
@@ -77,7 +85,7 @@ class SessionController extends Notifier<SessionState> {
     final vm = prefs.viewMode(active.id);
     final accounts = prefs.accounts(active.id);
     // Restore the active account's token and verify it in the background.
-    _bootstrap(active);
+    _bootstrap(active, ++_restoreRevision);
     return SessionState(
       status: SessionStatus.loading,
       viewMode: vm,
@@ -85,11 +93,43 @@ class SessionController extends Notifier<SessionState> {
     );
   }
 
-  AuthRepository get _auth => ref.read(authRepositoryProvider);
+  bool _current(LdInstance instance, int revision) =>
+      ref.mounted &&
+      revision == _restoreRevision &&
+      ref.read(activeInstanceProvider)?.id == instance.id;
+
+  Future<T> _withCredentials<T>(Future<T> Function() action) async {
+    final previous = _credentialMutations;
+    final release = Completer<void>();
+    _credentialMutations = release.future;
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release.complete();
+    }
+  }
+
+  Future<T> _withAuth<T>(
+    LdInstance instance,
+    String? token,
+    Future<T> Function(AuthRepository auth) action,
+  ) async {
+    final dio = buildDio(
+      baseUrl: instance.baseUrl,
+      trustSelfSigned: instance.trustSelfSigned,
+      token: () => token,
+    );
+    try {
+      return await action(AuthRepository(dio));
+    } finally {
+      dio.close();
+    }
+  }
 
   // ---- Session restore -----------------------------------------------------
 
-  Future<void> _bootstrap(LdInstance active) async {
+  Future<void> _bootstrap(LdInstance active, int revision) async {
     final store = ref.read(secureStoreProvider);
     final prefs = ref.read(prefsProvider);
     var accounts = prefs.accounts(active.id);
@@ -97,20 +137,28 @@ class SessionController extends Notifier<SessionState> {
     // One-time migration from the legacy single-token-per-instance layout.
     if (accounts.isEmpty) {
       final legacy = await store.readToken(active.id);
+      if (!_current(active, revision)) return;
       if (legacy == null || legacy.isEmpty) {
         state = _unauth(const []);
         return;
       }
-      state = state.copyWith(token: legacy);
       try {
-        final user = await _auth.me();
-        await store.writeUserToken(active.id, user.username, legacy);
-        await store.deleteToken(active.id);
+        final user = await _withAuth(active, legacy, (auth) => auth.me());
+        if (!_current(active, revision)) return;
+        await _withCredentials(() async {
+          if (!_current(active, revision)) return;
+          await store.writeUserToken(active.id, user.username, legacy);
+          await store.deleteToken(active.id);
+        });
+        if (!_current(active, revision)) return;
         accounts = [Account.fromUser(user)];
         await prefs.writeAccounts(active.id, accounts);
         await prefs.setActiveAccount(active.id, user.username);
+        if (!_current(active, revision)) return;
         state = _authed(user, legacy, accounts);
+        await _configureBackgroundAccess(active, user);
       } on ApiException catch (e) {
+        if (!_current(active, revision)) return;
         if (e.isAuth) await store.deleteToken(active.id);
         state = _unauth(const [], message: e.isAuth ? null : e.message);
       }
@@ -123,21 +171,42 @@ class SessionController extends Notifier<SessionState> {
       username = accounts.first.username;
       await prefs.setActiveAccount(active.id, username);
     }
+    final selectedUsername = username;
+    final account = accounts.where((item) => item.username == username).first;
+    if (account.userId != null &&
+        prefs.backupAccountBlocked(active.id, account.userId!)) {
+      if (_current(active, revision)) {
+        state = _unauth(
+          accounts,
+          message: 'Please sign in again as $username.',
+        );
+      }
+      return;
+    }
     final token = await store.readUserToken(active.id, username);
+    if (!_current(active, revision)) return;
     if (token == null || token.isEmpty) {
       // A listed account without a stored token — require re-login but keep it.
       state = _unauth(accounts);
       return;
     }
-    state = state.copyWith(token: token, accounts: accounts);
     try {
-      final user = await _auth.me();
+      final user = await _withAuth(active, token, (auth) => auth.me());
+      if (!_current(active, revision)) return;
       accounts = _upsert(accounts, Account.fromUser(user));
       await prefs.writeAccounts(active.id, accounts);
+      if (!_current(active, revision)) return;
       state = _authed(user, token, accounts);
+      await _configureBackgroundAccess(active, user);
     } on ApiException catch (e) {
+      if (!_current(active, revision)) return;
       if (e.isAuth) {
-        await store.deleteUserToken(active.id, username);
+        await _withCredentials(() async {
+          if (await store.readUserToken(active.id, selectedUsername) == token) {
+            await store.deleteUserToken(active.id, selectedUsername);
+          }
+        });
+        if (!_current(active, revision)) return;
         state = _unauth(accounts);
       } else {
         state = _unauth(accounts, message: e.message);
@@ -153,7 +222,11 @@ class SessionController extends Notifier<SessionState> {
   Future<void> login(String username, String password) async {
     final active = ref.read(activeInstanceProvider);
     if (active == null) throw ApiException('No server selected');
-    final res = await _auth.login(username, password);
+    final res = await _withAuth(
+      active,
+      null,
+      (auth) => auth.login(username, password),
+    );
     if (res.token == null || res.user == null) {
       throw ApiException('Login failed');
     }
@@ -165,7 +238,11 @@ class SessionController extends Notifier<SessionState> {
   Future<AuthResult> register(String username, String password) async {
     final active = ref.read(activeInstanceProvider);
     if (active == null) throw ApiException('No server selected');
-    final res = await _auth.register(username, password);
+    final res = await _withAuth(
+      active,
+      null,
+      (auth) => auth.register(username, password),
+    );
     if (!res.pending && res.token != null && res.user != null) {
       await _activate(active, res.user!, res.token!);
     }
@@ -173,14 +250,35 @@ class SessionController extends Notifier<SessionState> {
   }
 
   /// Persist a freshly authenticated account and make it the active session.
-  Future<void> _activate(LdInstance active, AppUser user, String token) async {
+  Future<void> _activate(LdInstance active, AppUser user, String token) =>
+      _withCredentials(() => _activateLocked(active, user, token));
+
+  Future<void> _activateLocked(
+    LdInstance active,
+    AppUser user,
+    String token,
+  ) async {
+    if (!ref.mounted || ref.read(activeInstanceProvider)?.id != active.id) {
+      throw ApiException('The server changed. Sign in to the selected server.');
+    }
+    final revision = ++_restoreRevision;
     final store = ref.read(secureStoreProvider);
     final prefs = ref.read(prefsProvider);
+    if ((state.user?.username != user.username || state.user?.id != user.id) &&
+        !await _stopBackupBeforeAccountChange(active)) {
+      throw ApiException(
+        state.message ?? 'Could not pause the previous backup.',
+      );
+    }
     await store.writeUserToken(active.id, user.username, token);
+    if (!_current(active, revision)) return;
     final accounts = _upsert(prefs.accounts(active.id), Account.fromUser(user));
     await prefs.writeAccounts(active.id, accounts);
     await prefs.setActiveAccount(active.id, user.username);
+    await prefs.setBackupAccountBlocked(active.id, user.id, false);
+    if (!_current(active, revision)) return;
     state = _authed(user, token, accounts);
+    await _configureBackgroundAccess(active, user);
     await ref
         .read(connectionControllerProvider.notifier)
         .markConnected(active.id);
@@ -196,11 +294,23 @@ class SessionController extends Notifier<SessionState> {
     if (active == null) return;
     final prev = state;
     if (prev.isAuthenticated && prev.user?.username == username) return;
+    final revision = ++_restoreRevision;
 
     final store = ref.read(secureStoreProvider);
     final prefs = ref.read(prefsProvider);
     final accounts = prefs.accounts(active.id);
-    final token = await store.readUserToken(active.id, username);
+    final savedAccount = accounts
+        .where((account) => account.username == username)
+        .firstOrNull;
+    final blocked =
+        savedAccount?.userId != null &&
+        prefs.backupAccountBlocked(active.id, savedAccount!.userId!);
+    final token = blocked
+        ? null
+        : await store.readUserToken(active.id, username);
+    if (!_current(active, revision)) return;
+    if (!await _stopBackupBeforeAccountChange(active)) return;
+    if (!_current(active, revision)) return;
 
     if (token == null || token.isEmpty) {
       // The account has no stored token — needs a fresh login.
@@ -211,17 +321,28 @@ class SessionController extends Notifier<SessionState> {
     }
 
     await prefs.setActiveAccount(active.id, username);
-    // Swap the token first so /me runs as the target user; keep the current UI
-    // visible (no splash flash) until we know the switch succeeded.
-    state = prev.copyWith(token: token, clearMessage: true);
+    // Verify with an identity-bound client; do not lend the target user's token
+    // to requests belonging to the still-visible previous session.
+    _checkingSwitchedAccount = true;
     try {
-      final user = await _auth.me();
+      final user = await _withAuth(active, token, (auth) => auth.me());
+      if (!_current(active, revision)) return;
       final updated = _upsert(accounts, Account.fromUser(user));
       await prefs.writeAccounts(active.id, updated);
+      if (!_current(active, revision)) return;
       state = _authed(user, token, updated);
+      await _configureBackgroundAccess(active, user);
       ref.invalidate(dioProvider);
     } on ApiException catch (e) {
-      if (e.isAuth) await store.deleteUserToken(active.id, username);
+      if (!_current(active, revision)) return;
+      if (e.isAuth) {
+        await _withCredentials(() async {
+          if (await store.readUserToken(active.id, username) == token) {
+            await store.deleteUserToken(active.id, username);
+          }
+        });
+      }
+      if (!_current(active, revision)) return;
       // Revert to the previous account and surface the failure.
       await prefs.setActiveAccount(active.id, prev.user?.username);
       state = prev.copyWith(
@@ -229,6 +350,8 @@ class SessionController extends Notifier<SessionState> {
             ? 'Could not switch to $username — the session expired.'
             : e.message,
       );
+    } finally {
+      _checkingSwitchedAccount = false;
     }
   }
 
@@ -239,26 +362,78 @@ class SessionController extends Notifier<SessionState> {
   Future<void> signOutAccount(String username) async {
     final active = ref.read(activeInstanceProvider);
     if (active == null) return;
+    final fallback = await _withCredentials(
+      () => _signOutLocked(active, username),
+    );
+    if (fallback != null && _current(active, fallback.$2)) {
+      await switchAccount(fallback.$1);
+    }
+  }
+
+  Future<(String, int)?> _signOutLocked(
+    LdInstance active,
+    String username,
+  ) async {
     final store = ref.read(secureStoreProvider);
     final prefs = ref.read(prefsProvider);
-    final isActive = state.isAuthenticated && state.user?.username == username;
+    final isActive =
+        ref.read(activeInstanceProvider)?.id == active.id &&
+        prefs.activeAccount(active.id) == username;
+    final revision = isActive ? ++_restoreRevision : _restoreRevision;
+    final account = prefs
+        .accounts(active.id)
+        .where((value) => value.username == username)
+        .firstOrNull;
+    final oldToken = await store.readUserToken(active.id, username);
+    if (isActive && _current(active, revision)) {
+      state = SessionState(
+        status: SessionStatus.loading,
+        viewMode: state.viewMode,
+        accounts: prefs.accounts(active.id),
+      );
+    }
+    try {
+      await stopAccountBackup(
+        prefs: prefs,
+        instanceId: active.id,
+        userId: account?.userId,
+        discard: true,
+        blockNewWork: true,
+        invalidateSession: isActive,
+      );
+    } catch (error) {
+      if (ref.mounted && ref.read(activeInstanceProvider)?.id == active.id) {
+        state = isActive
+            ? _unauth(
+                prefs.accounts(active.id),
+                message: backupFailureMessage(error),
+              )
+            : state.copyWith(message: backupFailureMessage(error));
+      }
+      return null;
+    }
 
     if (isActive) {
       try {
-        await _auth.logout();
-      } catch (_) {
-        // Best-effort; local sign-out proceeds regardless.
+        await _withAuth(active, oldToken, (auth) => auth.logout());
+      } on ApiException catch (error) {
+        await prefs.setBackgroundError(error.message);
       }
     }
     await store.deleteUserToken(active.id, username);
-    final remaining =
-        prefs.accounts(active.id).where((a) => a.username != username).toList();
+    final remaining = prefs
+        .accounts(active.id)
+        .where((a) => a.username != username)
+        .toList();
     await prefs.writeAccounts(active.id, remaining);
 
     if (!isActive) {
-      state = state.copyWith(accounts: remaining);
-      return;
+      if (ref.mounted && ref.read(activeInstanceProvider)?.id == active.id) {
+        state = state.copyWith(accounts: remaining);
+      }
+      return null;
     }
+    if (!_current(active, revision)) return null;
     if (remaining.isNotEmpty) {
       await prefs.setActiveAccount(active.id, null);
       state = SessionState(
@@ -266,12 +441,13 @@ class SessionController extends Notifier<SessionState> {
         viewMode: state.viewMode,
         accounts: remaining,
       );
-      await switchAccount(remaining.first.username);
+      return (remaining.first.username, revision);
     } else {
       await prefs.setActiveAccount(active.id, null);
       state = _unauth(const []);
       ref.invalidate(dioProvider);
     }
+    return null;
   }
 
   /// Top-level "Sign out" — signs out the active account (falling back to any
@@ -305,11 +481,14 @@ class SessionController extends Notifier<SessionState> {
   /// Called by the Dio 401 hook — drop the active account's token so the router
   /// shows login. The account stays listed for easy re-authentication.
   void handleUnauthorized() {
-    if (state.status != SessionStatus.authenticated) return;
+    if (_checkingSwitchedAccount ||
+        state.status != SessionStatus.authenticated) {
+      return;
+    }
     final active = ref.read(activeInstanceProvider);
     final username = state.user?.username;
     if (active != null && username != null) {
-      ref.read(secureStoreProvider).deleteUserToken(active.id, username);
+      _cancelUnauthorizedBackup(active, username, state.user?.id, state.token);
     }
     final accounts = active == null
         ? const <Account>[]
@@ -331,10 +510,78 @@ class SessionController extends Notifier<SessionState> {
       viewMode: state.viewMode,
       accounts: state.accounts,
     );
-    await _bootstrap(active);
+    await _bootstrap(active, ++_restoreRevision);
   }
 
   // ---- Helpers -------------------------------------------------------------
+
+  Future<bool> _stopBackupBeforeAccountChange(LdInstance active) async {
+    final prefs = ref.read(prefsProvider);
+    final previousName = prefs.activeAccount(active.id);
+    final previous = prefs
+        .accounts(active.id)
+        .where((account) => account.username == previousName)
+        .firstOrNull;
+    try {
+      await stopAccountBackup(
+        prefs: prefs,
+        instanceId: active.id,
+        userId: previous?.userId,
+      );
+      return true;
+    } catch (error) {
+      state = state.copyWith(message: backupFailureMessage(error));
+      return false;
+    }
+  }
+
+  Future<void> _configureBackgroundAccess(
+    LdInstance active,
+    AppUser user,
+  ) async {
+    final prefs = ref.read(prefsProvider);
+    try {
+      final backup = prefs.readBackupSettings(active.id, user.id);
+      await ref
+          .read(secureStoreProvider)
+          .setBackgroundAccess(
+            active.id,
+            user.username,
+            enabled: backup.enabled || prefs.notificationsEnabled,
+          );
+      await prefs.setBackgroundError(null);
+    } catch (error) {
+      final message = backupFailureMessage(error);
+      await prefs.setBackgroundError(message);
+      state = state.copyWith(message: message);
+    }
+  }
+
+  Future<void> _cancelUnauthorizedBackup(
+    LdInstance active,
+    String username,
+    int? userId,
+    String? expiredToken,
+  ) => _withCredentials(() async {
+    final prefs = ref.read(prefsProvider);
+    final store = ref.read(secureStoreProvider);
+    if (expiredToken == null ||
+        await store.readUserToken(active.id, username) != expiredToken) {
+      return;
+    }
+    try {
+      await stopAccountBackup(
+        prefs: prefs,
+        instanceId: active.id,
+        userId: userId,
+        blockNewWork: true,
+      );
+    } catch (error) {
+      await prefs.setBackgroundError(backupFailureMessage(error));
+    } finally {
+      await store.deleteUserToken(active.id, username);
+    }
+  });
 
   SessionState _authed(AppUser user, String token, List<Account> accounts) =>
       SessionState(
@@ -357,7 +604,7 @@ class SessionController extends Notifier<SessionState> {
     final out = [...list];
     final idx = out.indexWhere((a) => a.username == acc.username);
     if (idx >= 0) {
-      out[idx] = out[idx].copyWith(role: acc.role);
+      out[idx] = out[idx].copyWith(role: acc.role, userId: acc.userId);
     } else {
       out.add(acc);
     }

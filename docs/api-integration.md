@@ -6,17 +6,18 @@ The app consumes LocalDrive-Master exclusively through HTTP/SSE/tus paths define
 - Base URL comes from the active `LdInstance.baseUrl` (`scheme://host:port`).
 - JSON calls use `dioProvider` and repository wrappers.
 - Auth uses `Authorization: Bearer <token>` from secure storage.
-- Admin view scope uses `Cookie: ld_view=admin|user`; normal users do not send it.
+- Ordinary admin browsing uses `Cookie: ld_view=admin|user`; normal browsing needs no
+  scope cookie. Backup requests explicitly force `ld_view=user` for every account.
 - Self-signed TLS trust is per saved instance (`trustSelfSigned`) and only after user approval.
 - Client paths are server scope-relative POSIX paths; `drive` is a drive UUID.
 
 ## Auth — `AuthRepository`
 | `Api.*` | Path | Method | Purpose |
 | --- | --- | --- | --- |
-| `Api.login` | `/api/auth/login` | POST | Body `{username,password}`; returns `{token,user}`. Token is stored per instance. |
+| `Api.login` | `/api/auth/login` | POST | Body `{username,password}`; returns `{token,user}`. Token is stored per instance/account. |
 | `Api.register` | `/api/auth/register` | POST | May return `{pending:true,message}` or `{token,user}` if auto-approved. |
-| `Api.logout` | `/api/auth/logout` | POST | Best-effort server logout; local token is always deleted. |
-| `Api.me` | `/api/auth/me` | GET | Session restore; 401 deletes the saved token. |
+| `Api.logout` | `/api/auth/logout` | POST | Server logout endpoint; local account logout stops owned backup before deleting credentials. |
+| `Api.me` | `/api/auth/me` | GET | Session restore; a delayed 401 must not invalidate a replacement session. |
 | `Api.authConfig` | `/api/auth/config` | GET | Public registration flag for showing create-account UI. |
 
 Pending accounts are surfaced by login/register flows and cannot access the app shell.
@@ -60,6 +61,33 @@ delete, upload, preview, download, open, and share.
 `authHeadersProvider`. For self-signed instances it uses a custom `IOClient` with permissive
 certificate callback only when the instance has been trusted.
 
+### Recoverable native backup
+The iOS backup coordinator retains tus but hands file-backed PATCH transfers to
+background URLSession. Preparation/retry uses POST and HEAD while an execution
+window is available. All backup requests explicitly use `ld_view=user`.
+
+Servers supporting durable recovery advertise:
+```json
+{"capabilities":{"backgroundBackupTus":1}}
+```
+in the existing `/api/health` response. Creation adds `backupJobId` and
+`backupSha256` to the normal tus metadata. A stable job ID recovers the same upload
+instead of creating duplicates after a lost response.
+
+`GET /api/backup/uploads/:jobId` is authenticated and owner-scoped. It returns
+uploading/finalizing/complete/failed status, tus resource URL, content identity and
+actual destination. A complete receipt proves finalization even after the tus
+sidecar has been removed. An unfinished resource still uses HEAD for its offset.
+Duplicate creation returns 409 and is reconciled through this status endpoint.
+Recovery checks current access and must not overwrite unrelated same-named files.
+Completed backup HEAD/PATCH requests return 410 and require receipt recovery.
+Validate immutable job/content/destination identity; an offset equal to the file
+length is not completion proof. Backup authentication is bearer-only and must not
+fall back to another account's cookie.
+
+Older servers remain compatible with foreground uploads; the app explicitly
+requests a server update for recoverable native background backup.
+
 ## Admin — `AdminRepository`
 | `Api.*` | Path | Method(s) | Purpose |
 | --- | --- | --- | --- |
@@ -84,7 +112,7 @@ Admin-only screens are reachable from Settings/Admin console and from the Drives
 
 `filesChanged` invalidates file lists and may post a notification. `accessChanged` and
 `drivesChanged` invalidate the drive list. Background polling stores cursors under
-`ld.change_cursor.<instanceId>`.
+`ld.change_cursor.<profileId>`, with profileId the instance/server-user-ID tuple.
 
 ## Utility/connectivity
 | `Api.*` | Path | Method | Purpose |
@@ -98,4 +126,6 @@ LocalDrive-App depends on LocalDrive-Master additions that must remain backward-
 - `_localdrive._tcp` mDNS advertisement with TXT metadata (`path`, `api`, `https`, `httpsPort`).
 - `GET /api/events/user` user-scoped SSE with bearer/cookie auth.
 - `GET /api/changes?since=` compact changes feed returning `{changes,cursor}`.
+- Optional `capabilities.backgroundBackupTus` and owner-scoped
+  `GET /api/backup/uploads/:jobId` receipts for native backup recovery.
 - Bearer auth support on all routes, including SSE.

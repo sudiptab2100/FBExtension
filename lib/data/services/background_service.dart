@@ -1,13 +1,20 @@
+import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:collection/collection.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../../core/config/constants.dart';
+import '../../core/network/api_exception.dart';
 import '../../core/network/dio_client.dart';
+import '../../core/storage/prefs.dart';
 import '../models/ld_instance.dart';
+import 'background_session.dart';
 import 'backup_engine.dart';
+import 'backup_errors.dart';
 import 'notification_service.dart';
 
 /// WorkManager entry point. Runs in a dedicated background isolate, so it must
@@ -18,15 +25,23 @@ void backgroundDispatcher() {
     try {
       switch (task) {
         case BgTasks.backup:
+          await BackgroundService.reconcileScheduling(includeRefresh: false);
           await (BackgroundHooks.runBackup ?? runHeadlessBackup)();
           return true;
         case BgTasks.refresh:
+          return await _pollChanges();
         default:
-          await _pollChanges();
-          return true;
+          throw UnsupportedError('Unknown background task: $task');
       }
-    } catch (_) {
-      // Returning false lets WorkManager retry with backoff.
+    } catch (error, stack) {
+      final prefs = await Prefs.create();
+      await prefs.setBackgroundError(backupFailureMessage(error));
+      if (kDebugMode) {
+        debugPrintStack(
+          label: 'Background task failed (${error.runtimeType})',
+          stackTrace: stack,
+        );
+      }
       return false;
     }
   });
@@ -35,37 +50,24 @@ void backgroundDispatcher() {
 /// Poll `/api/changes` for every saved instance that has a stored token, and
 /// surface new changes as local notifications. The per-instance cursor makes
 /// this incremental and idempotent across wake-ups.
-Future<void> _pollChanges() async {
-  final prefs = await SharedPreferences.getInstance();
-  final raw = prefs.getString(StoreKeys.savedInstances);
-  if (raw == null || raw.isEmpty) return;
-
-  List<LdInstance> instances;
-  try {
-    instances = (jsonDecode(raw) as List)
-        .map((e) => LdInstance.fromJson(e as Map<String, dynamic>))
-        .toList();
-  } catch (_) {
-    return;
-  }
-  if (instances.isEmpty) return;
-
-  const secure = FlutterSecureStorage();
+Future<bool> _pollChanges() async {
+  final prefs = await Prefs.create();
+  await prefs.reload();
+  if (!prefs.notificationsEnabled) return true;
   final notif = NotificationService.instance;
   await notif.init();
-  final notificationsOn =
-      prefs.getBool(SettingKeys.notificationsEnabled) ?? true;
+  var succeeded = true;
 
-  for (final inst in instances) {
-    final token = await secure.read(key: '${StoreKeys.tokenPrefix}${inst.id}');
-    if (token == null || token.isEmpty) continue;
-
-    final cursorKey = '${StoreKeys.lastChangeCursor}${inst.id}';
-    final since = prefs.getString(cursorKey);
-
+  for (final inst in prefs.readInstances()) {
+    final account = await loadBackgroundAccount(
+      prefs: prefs,
+      instanceId: inst.id,
+    );
+    if (account == null) continue;
+    final since = prefs.accountChangeCursor(inst.id, account.userId);
     final dio = buildDio(
       baseUrl: inst.baseUrl,
-      token: () => token,
+      token: () => account.token,
       trustSelfSigned: inst.trustSelfSigned,
     );
     try {
@@ -76,17 +78,27 @@ Future<void> _pollChanges() async {
       final data = res.data as Map<String, dynamic>;
       final changes = (data['changes'] as List?) ?? const [];
       final cursor = data['cursor'] as String?;
-      if (cursor != null) await prefs.setString(cursorKey, cursor);
+      if (!await isBackgroundAccountCurrent(account, prefs: prefs) ||
+          !prefs.notificationsEnabled) {
+        continue;
+      }
+      if (cursor != null) {
+        await prefs.setAccountChangeCursor(inst.id, account.userId, cursor);
+      }
 
-      if (notificationsOn && since != null && changes.isNotEmpty) {
+      if (since != null && changes.isNotEmpty) {
         await _notifyChanges(notif, inst, changes);
       }
-    } catch (_) {
-      /* transient; try again next wake-up */
+    } on DioException catch (error) {
+      succeeded = false;
+      await prefs.setBackgroundError(
+        '${inst.name}: ${ApiException.from(error).message}',
+      );
     } finally {
       dio.close();
     }
   }
+  return succeeded;
 }
 
 Future<void> _notifyChanges(
@@ -98,8 +110,9 @@ Future<void> _notifyChanges(
       .whereType<Map<String, dynamic>>()
       .where((c) => c['kind'] == 'file')
       .toList();
-  final access =
-      changes.whereType<Map<String, dynamic>>().any((c) => c['kind'] == 'access');
+  final access = changes.whereType<Map<String, dynamic>>().any(
+    (c) => c['kind'] == 'access',
+  );
 
   if (files.isNotEmpty) {
     final first = files.first;
@@ -130,7 +143,33 @@ class BackgroundHooks {
 class BackgroundService {
   BackgroundService._();
 
+  static const _native = MethodChannel('localdrive/bg_upload');
+  static Future<void> _scheduling = Future<void>.value();
+
+  static bool get isSupported =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android);
+
+  static Future<Map<String, dynamic>?> environment() async {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+    final result = await _native.invokeMapMethod<String, dynamic>(
+      'environment',
+    );
+    if (result == null) {
+      throw StateError(
+        'iOS background status is unavailable. Reopen LocalDrive.',
+      );
+    }
+    return result;
+  }
+
   static Future<void> initialize() async {
+    if (!isSupported) {
+      throw UnsupportedError(
+        'Background backup is available on iOS and Android.',
+      );
+    }
     await Workmanager().initialize(backgroundDispatcher);
   }
 
@@ -148,20 +187,150 @@ class BackgroundService {
     await Workmanager().cancelByUniqueName(BgTasks.refresh);
   }
 
-  static Future<void> enableBackup({bool wifiOnly = true}) async {
+  static Constraints backupConstraints({
+    required bool isIOS,
+    required bool wifiOnly,
+    required bool chargingOnly,
+  }) => Constraints(
+    networkType: isIOS || !wifiOnly
+        ? NetworkType.connected
+        : NetworkType.unmetered,
+    requiresCharging: chargingOnly,
+  );
+
+  static Future<void> enableBackup({
+    bool wifiOnly = true,
+    bool chargingOnly = true,
+  }) async {
+    final ios = defaultTargetPlatform == TargetPlatform.iOS;
+    final constraints = backupConstraints(
+      isIOS: ios,
+      wifiOnly: wifiOnly,
+      chargingOnly: chargingOnly,
+    );
+    if (ios) {
+      await Workmanager().cancelByUniqueName(BgTasks.backup);
+      await Workmanager().registerProcessingTask(
+        BgTasks.backup,
+        BgTasks.backup,
+        initialDelay: const Duration(hours: 1),
+        constraints: constraints,
+      );
+      final availability = await environment();
+      final pending = availability?['pendingTaskIdentifiers'];
+      if (pending is! List || !pending.contains(BgTasks.backup)) {
+        throw StateError(
+          'iOS has not scheduled backup. Check Background App Refresh and reopen the app.',
+        );
+      }
+      return;
+    }
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      throw UnsupportedError(
+        'Background backup is available on iOS and Android.',
+      );
+    }
     await Workmanager().registerPeriodicTask(
       BgTasks.backup,
       BgTasks.backup,
       frequency: const Duration(hours: 1),
-      constraints: Constraints(
-        networkType: wifiOnly ? NetworkType.unmetered : NetworkType.connected,
-        requiresCharging: false,
-      ),
+      constraints: constraints,
       existingWorkPolicy: ExistingPeriodicWorkPolicy.update,
     );
   }
 
   static Future<void> disableBackup() async {
     await Workmanager().cancelByUniqueName(BgTasks.backup);
+  }
+
+  static Future<void> reconcileScheduling({bool includeRefresh = true}) async {
+    if (!isSupported) return;
+    final previous = _scheduling;
+    final release = Completer<void>();
+    _scheduling = release.future;
+    await previous;
+    try {
+      await _reconcileScheduling(includeRefresh: includeRefresh);
+    } finally {
+      release.complete();
+    }
+  }
+
+  static Future<void> _reconcileScheduling({
+    required bool includeRefresh,
+  }) async {
+    final prefs = await Prefs.create();
+    while (true) {
+      await prefs.reload();
+      final before = _scheduleConfiguration(prefs);
+      try {
+        if (includeRefresh) {
+          if (prefs.notificationsEnabled) {
+            await enableChangePolling();
+          } else {
+            await disableChangePolling();
+          }
+        }
+        await _scheduleBackup(prefs);
+      } catch (_) {
+        await prefs.reload();
+        if (_scheduleConfiguration(prefs) == before) rethrow;
+        continue;
+      }
+      await prefs.reload();
+      if (_scheduleConfiguration(prefs) == before) return;
+    }
+  }
+
+  static String _scheduleConfiguration(Prefs prefs) {
+    final id = prefs.activeInstanceId;
+    final username = id == null ? null : prefs.activeAccount(id);
+    final userId = id == null
+        ? null
+        : prefs
+              .accounts(id)
+              .firstWhereOrNull((account) => account.username == username)
+              ?.userId;
+    return jsonEncode([
+      prefs.backupGeneration,
+      prefs.notificationsEnabled,
+      id,
+      username,
+      userId,
+      if (id != null && userId != null) ...[
+        prefs.backupAccountBlocked(id, userId),
+        prefs.readBackupSettings(id, userId).toJson(),
+      ],
+    ]);
+  }
+
+  static Future<void> _scheduleBackup(Prefs prefs) async {
+    final instanceId = prefs.activeInstanceId;
+    final username = instanceId == null
+        ? null
+        : prefs.activeAccount(instanceId);
+    final userId = instanceId == null
+        ? null
+        : prefs
+              .accounts(instanceId)
+              .firstWhereOrNull((account) => account.username == username)
+              ?.userId;
+    if (instanceId == null || userId == null) {
+      await disableBackup();
+      return;
+    }
+    if (prefs.backupAccountBlocked(instanceId, userId)) {
+      await disableBackup();
+      return;
+    }
+    final settings = prefs.readBackupSettings(instanceId, userId);
+    if (settings.runnable) {
+      await enableBackup(
+        wifiOnly: settings.wifiOnly,
+        chargingOnly: settings.chargingOnly,
+      );
+    } else {
+      await disableBackup();
+    }
   }
 }

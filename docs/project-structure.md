@@ -35,7 +35,7 @@ lib/
 | Path | Role |
 | --- | --- |
 | `main.dart` | Loads `Prefs`, initializes notifications/background services, enables polling/backup if persisted settings require it, then starts `ProviderScope`. |
-| `app.dart` | Root `ConsumerWidget`; watches router, theme mode, and `liveEventsProvider`; renders `MaterialApp.router`. |
+| `app.dart` | Root `ConsumerStatefulWidget`; renders the router/theme and drives lifecycle, power/network catch-up, scheduling and completion reconciliation. |
 
 ## `core/`
 | Path | Role |
@@ -47,8 +47,9 @@ lib/
 | `core/network/dio_client.dart` | Dio factory with bearer, `ld_view`, TLS trust, and 401 handling interceptors. |
 | `core/network/sse_client.dart` | Generic SSE line parser yielding `SseEvent(event,data)`. |
 | `core/storage/prefs.dart` | SharedPreferences wrapper for instances, active id, view mode, theme, notifications, change cursors, JSON blobs. |
-| `core/storage/secure_store.dart` | Per-instance JWT storage in Keychain/Keystore. |
-| `core/storage/local_db.dart` | sqflite `backup_ledger` and `upload_queue`. |
+| `core/storage/secure_store.dart` | Per-account JWT storage and atomic iOS background-access migration. |
+| `core/storage/backup_keys.dart` | Canonical instance/server-user-ID profile keys. |
+| `core/storage/local_db.dart` | Schema-v3 backup queue, ledger, leases, profile scans, attempts and native events; additive migrations and shared opening configuration. |
 | `core/utils/format.dart` | Human formatting for bytes/dates/relative times. |
 | `core/utils/json.dart` | Defensive JSON coercion helpers. |
 
@@ -59,12 +60,16 @@ lib/
 | `server_status.dart` | LocalDrive-Master `ServerStatus` from health/dashboard. |
 | `connect_info.dart` | `/api/connect` response (`urls`, `hostname`, `qr`, `addresses`, ports). |
 | `user.dart` | `AppUser`, `UserRole`, `UserStatus`. |
+| `account.dart` | Saved username/role plus verified server user ID for account isolation. |
 | `drive_info.dart` | `DriveInfo` and opt-in `DriveAccess`. |
 | `file_entry.dart` | `FileEntry` plus `SearchHit`. |
 | `acl.dart` | Admin ACLs and `AdminUser`. |
 | `access_request.dart` | Pending drive access approval shape. |
 | `app_config.dart` | Admin-visible server config. |
-| `backup_settings.dart` | Persisted auto-backup settings and `runnable` eligibility. |
+| `backup_settings.dart` | Account-owned sources/destination, Wi-Fi/charging gates and `runnable` eligibility. |
+| `backup_context.dart` | Immutable account/server/destination/generation captured for a backup pass. |
+| `backup_job.dart` | Durable jobs, attempts, receipts, failures and destination/source helpers. |
+| `backup_snapshot.dart` | Persisted progress, waiting/error state and last attempt/success. |
 
 ## `data/repositories/`
 | Repository | Calls |
@@ -81,9 +86,17 @@ lib/
 | `discovery_service.dart` | NSD mDNS browsing for `_localdrive._tcp` and filtered `_http._tcp`. |
 | `upload_service.dart` | tus `/api/upload` client with auth metadata and optional self-signed TLS trust. |
 | `notification_service.dart` | Local notification initialization, permission request, channel creation, posting. |
-| `background_service.dart` | WorkManager dispatcher and registration for changes/backup tasks. |
-| `media_service.dart` | Gallery albums/assets, contact permission/count/export vCard. |
-| `backup_engine.dart` | Pure backup engine and headless WorkManager backup entry point. |
+| `background_service.dart` | iOS processing/Android periodic registration, rescheduling and change polling. |
+| `background_session.dart` | Headless account/token resolution, generation checks and scoped polling cursors. |
+| `media_service.dart` | Gallery/contact sources and foreground-only permission requests; headless permission checks. |
+| `backup_engine.dart` | Compatibility wrapper and headless backup entry point. |
+| `backup_coordinator.dart` | Bounded preparation, leases, durable queue, retries and receipt/event reconciliation. |
+| `backup_staging.dart` | Owned source/suffix files, streaming copies/hashes and space limits. |
+| `backup_tus_service.dart` | Creation, HEAD offsets, receipt recovery and foreground/Dart transfer support. |
+| `background_upload_service.dart` | Typed iOS task, progress, completion read/ACK and cancellation bridge. |
+| `backup_policy.dart` | Account, permission, destination, network, charging and retry eligibility. |
+| `backup_session_actions.dart` | Pause/cancel and generation fencing before account changes. |
+| `backup_errors.dart` | User-facing error normalization. |
 
 ## `state/`
 | File | Providers/controllers |
@@ -92,10 +105,10 @@ lib/
 | `api_providers.dart` | `dioProvider`, `authHeadersProvider`, repository providers. |
 | `connection_controller.dart` | Saved instances and active server selection. |
 | `connect_controller.dart` | Candidate health probe and persistence. |
-| `session_controller.dart` | Login/register/logout, token restore, 401 handling, admin view mode. |
+| `session_controller.dart` | Multi-account login/restore/switch/logout, serialized credentials, backup fencing and scoped 401 handling. |
 | `settings_controller.dart` | Theme mode and notification toggle. |
 | `live_events.dart` | Foreground `/api/events/user` subscription and provider invalidation. |
-| `backup_controller.dart` | Persisted backup settings and foreground `Back up now` runner. |
+| `backup_controller.dart` | Account-owned settings, manual/automatic catch-up, native reconciliation and persisted progress. |
 
 ## `features/`
 | Folder | Screens |
@@ -106,7 +119,7 @@ lib/
 | `drives/` | Drive list, access request action, admin view-mode toggle. |
 | `files/` | File browser, search, thumbnails, upload progress, preview/download/share. |
 | `device/` | Device-source upload tab, photo/video grid, destination picker. |
-| `backup/` | Auto-backup configuration and foreground run UI. |
+| `backup/` | Account-owned backup setup, charging/Wi-Fi policy, queued/transferring/waiting/error state and run history. |
 | `settings/` | Account/server/theme/notifications/admin entry/sign-out. |
 | `admin/` | Dashboard, users, access requests, config, server control. |
 
@@ -124,3 +137,15 @@ lib/
 | `test/auth_repository_test.dart` | Login parsing, pending registration, 401/error mapping. |
 | `test/models_test.dart` | `FileEntry`, `SearchHit`, `DriveInfo`, `AppUser`, `AppConfig` parsing. |
 | `test/files_repository_url_test.dart` | Formatting and binary URL builders for raw/thumb/zip/download. |
+| `test/local_db_open_test.dart` | Actual sqflite opening callback, Darwin query/execute semantics and reopening. |
+| `test/local_db_backup_test.dart` | Additive migrations, leases, durable completion and replay. |
+| `test/session_database_test.dart` | Normal-user activation and fail-safe backup pause/database failures. |
+| `test/backup_*_test.dart`, `test/background_*_test.dart` | Account isolation, staging/tus/native bridge, policy, lifecycle, retries and UI. |
+
+## Native iOS integration
+`ios/Runner/AppDelegate.swift` registers early BGTask handlers, headless plugins and
+background URLSession completion hooks. `BackgroundUploadPlugin.swift` exposes the
+engine-independent bridge; `BackgroundUploadCoordinator.swift` owns OS sessions and
+recovery; `BackgroundUploadState.swift` owns journal/staging/request validation.
+`ios/RunnerTests/run_native_regressions.sh` runs the host XCTest cases without changing
+the user's installed app. Physical-device observations remain a separate step.

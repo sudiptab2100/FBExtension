@@ -11,9 +11,9 @@ class ThemeModeController extends Notifier<ThemeMode> {
   ThemeMode build() => _parse(ref.watch(prefsProvider).themeMode);
 
   static ThemeMode _parse(String s) => ThemeMode.values.firstWhere(
-        (e) => e.name == s,
-        orElse: () => ThemeMode.system,
-      );
+    (e) => e.name == s,
+    orElse: () => ThemeMode.system,
+  );
 
   Future<void> set(ThemeMode mode) async {
     await ref.read(prefsProvider).setThemeMode(mode.name);
@@ -21,8 +21,9 @@ class ThemeModeController extends Notifier<ThemeMode> {
   }
 }
 
-final themeModeProvider =
-    NotifierProvider<ThemeModeController, ThemeMode>(ThemeModeController.new);
+final themeModeProvider = NotifierProvider<ThemeModeController, ThemeMode>(
+  ThemeModeController.new,
+);
 
 /// Whether change/backup notifications are shown. Persisted and mirrored into
 /// the background poller's WorkManager registration.
@@ -31,8 +32,25 @@ class NotificationsEnabledController extends Notifier<bool> {
   bool build() => ref.watch(prefsProvider).notificationsEnabled;
 
   Future<void> set(bool value) async {
-    await ref.read(prefsProvider).setNotificationsEnabled(value);
+    final prefs = ref.read(prefsProvider);
+    await prefs.setNotificationsEnabled(value);
     state = value;
+    final secure = ref.read(secureStoreProvider);
+    for (final instance in prefs.readInstances()) {
+      for (final account in prefs.accounts(instance.id)) {
+        final userId = account.userId;
+        if (userId == null ||
+            await secure.readUserToken(instance.id, account.username) == null) {
+          continue;
+        }
+        await secure.setBackgroundAccess(
+          instance.id,
+          account.username,
+          enabled:
+              value || prefs.readBackupSettings(instance.id, userId).enabled,
+        );
+      }
+    }
     if (value) {
       await ref.read(notificationServiceProvider).requestPermission();
       await BackgroundService.enableChangePolling();
@@ -44,4 +62,5 @@ class NotificationsEnabledController extends Notifier<bool> {
 
 final notificationsEnabledProvider =
     NotifierProvider<NotificationsEnabledController, bool>(
-        NotificationsEnabledController.new);
+      NotificationsEnabledController.new,
+    );

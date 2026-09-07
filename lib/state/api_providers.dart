@@ -22,14 +22,25 @@ final dioProvider = Provider<Dio>((ref) {
   final dio = buildDio(
     baseUrl: baseUrl,
     trustSelfSigned: active?.trustSelfSigned ?? false,
-    token: () => ref.read(sessionControllerProvider).token,
+    token: () {
+      if (!ref.mounted || ref.read(activeInstanceProvider)?.id != active?.id) {
+        return null;
+      }
+      return ref.read(sessionControllerProvider).token;
+    },
     viewMode: () {
+      if (!ref.mounted || ref.read(activeInstanceProvider)?.id != active?.id) {
+        return null;
+      }
       final s = ref.read(sessionControllerProvider);
       // Only admins carry an explicit view scope; users default server-side.
       return s.user?.isAdmin == true ? s.viewMode : null;
     },
-    onUnauthorized: () =>
-        ref.read(sessionControllerProvider.notifier).handleUnauthorized(),
+    onUnauthorized: () {
+      if (ref.mounted && ref.read(activeInstanceProvider)?.id == active?.id) {
+        ref.read(sessionControllerProvider.notifier).handleUnauthorized();
+      }
+    },
   );
   ref.onDispose(dio.close);
   return dio;
@@ -49,17 +60,22 @@ final authHeadersProvider = Provider<Map<String, String>>((ref) {
   return headers;
 });
 
-final authRepositoryProvider =
-    Provider<AuthRepository>((ref) => AuthRepository(ref.watch(dioProvider)));
+final authRepositoryProvider = Provider<AuthRepository>(
+  (ref) => AuthRepository(ref.watch(dioProvider)),
+);
 
 final connectRepositoryProvider = Provider<ConnectRepository>(
-    (ref) => ConnectRepository(ref.watch(dioProvider)));
+  (ref) => ConnectRepository(ref.watch(dioProvider)),
+);
 
 final drivesRepositoryProvider = Provider<DrivesRepository>(
-    (ref) => DrivesRepository(ref.watch(dioProvider)));
+  (ref) => DrivesRepository(ref.watch(dioProvider)),
+);
 
-final filesRepositoryProvider =
-    Provider<FilesRepository>((ref) => FilesRepository(ref.watch(dioProvider)));
+final filesRepositoryProvider = Provider<FilesRepository>(
+  (ref) => FilesRepository(ref.watch(dioProvider)),
+);
 
-final adminRepositoryProvider =
-    Provider<AdminRepository>((ref) => AdminRepository(ref.watch(dioProvider)));
+final adminRepositoryProvider = Provider<AdminRepository>(
+  (ref) => AdminRepository(ref.watch(dioProvider)),
+);

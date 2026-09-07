@@ -16,10 +16,13 @@ These conventions keep the Flutter client safe, predictable, and aligned with Lo
 - Do not invent endpoints in UI code; route all HTTP calls through repositories or services.
 
 ## Auth and secrets
-- JWTs belong in `SecureStore` only (`ld.token.<instanceId>`).
+- JWTs belong in `SecureStore` only (`ld.token.<instanceId>::<username>`).
+  The old per-instance key is migration-only. Never infer ownership of legacy backup rows.
 - Never log bearer tokens, cookies, passwords, QR values containing credentials, or raw certs.
 - `Prefs` is for non-secret settings only: instances, active id, view mode, theme,
   notification flag, change cursors, backup settings.
+- Backup profiles and change cursors are account-owned. Preserve generation fencing and
+  pause/cancel before switching accounts or deleting credentials.
 
 ## Paths and scope
 - Treat `drive` as a server UUID and `path` as a scope-relative POSIX path.
@@ -53,7 +56,19 @@ These conventions keep the Flutter client safe, predictable, and aligned with Lo
 ## Build rules
 - Prefix Flutter commands with `source ~/.localdrive_flutter_env.sh &&` on this host.
 - Keep Android compile SDK pinned to 36 unless the local platform/tooling issue is resolved.
-- Keep iOS documented as scaffold-only here; validate iOS changes with Xcode/signing elsewhere.
+- Preserve iOS signing and the pinned Xcode-compatible plugins. A build or simulator does
+  not establish physical background behavior; use an unlocked physical iPhone.
+- Keep build outputs, diagnostic credentials and staging fixtures out of Git.
+
+## Backup persistence
+- `LocalDb.open()` sets WAL and busy timeout with `rawQuery`: these pragmas return rows
+  and cannot use Darwin sqflite's non-query `execute` path. Exercise opening in regressions.
+- Extend the versioned database without dropping queues or assigning unowned history to
+  the active user. Jobs capture their original account, destination and source identity.
+- Reconcile server receipts before crediting completion. Read native events, commit the
+  queue/ledger transaction, then ACK; do not discard staging before reconciliation.
+- Charging-only/Wi-Fi-only default on. Manual backup bypasses charging, not authorization
+  or network policy. Waiting, queued and partially failed work must not become success.
 
 ## Documentation
 - Update this KB when behavior changes.

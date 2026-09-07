@@ -9,6 +9,7 @@ void main() {
       expect(s.hasDestination, isFalse);
       expect(s.hasSource, isTrue); // photos+videos default on
       expect(s.runnable, isFalse);
+      expect(s.chargingOnly, isTrue);
     });
 
     test('runnable requires enabled + destination + a source', () {
@@ -22,9 +23,7 @@ void main() {
 
       expect(base.copyWith(enabled: false).runnable, isFalse);
       expect(
-        base
-            .copyWith(photos: false, videos: false, contacts: false)
-            .runnable,
+        base.copyWith(photos: false, videos: false, contacts: false).runnable,
         isFalse,
       );
     });
@@ -41,6 +40,7 @@ void main() {
         videos: true,
         contacts: true,
         wifiOnly: false,
+        chargingOnly: false,
         driveUuid: 'uuid-9',
         driveLabel: 'SSD',
         folder: 'Phone/Auto',
@@ -51,6 +51,7 @@ void main() {
       expect(back.videos, s.videos);
       expect(back.contacts, s.contacts);
       expect(back.wifiOnly, s.wifiOnly);
+      expect(back.chargingOnly, s.chargingOnly);
       expect(back.driveUuid, s.driveUuid);
       expect(back.driveLabel, s.driveLabel);
       expect(back.folder, s.folder);
@@ -63,7 +64,17 @@ void main() {
       expect(s.videos, isTrue);
       expect(s.contacts, isFalse);
       expect(s.wifiOnly, isTrue);
+      expect(s.chargingOnly, isTrue);
       expect(s.folder, 'Backup');
+    });
+
+    test('copyWith changes charging policy without altering sources', () {
+      const original = BackupSettings(contacts: true);
+      final changed = original.copyWith(chargingOnly: false);
+      expect(changed.chargingOnly, isFalse);
+      expect(changed.contacts, isTrue);
+      expect(changed.copyWith().chargingOnly, isFalse);
+      expect(original.chargingOnly, isTrue);
     });
   });
 }

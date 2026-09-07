@@ -52,6 +52,20 @@ Source: `ios/Runner/Info.plist`.
 | `UIBackgroundModes` = `fetch`, `processing` | Background polling and backup. |
 | `BGTaskSchedulerPermittedIdentifiers` | `com.sudiptab2100.localdrive_app.refresh`, `.backup`. |
 
-The Xcode project currently sets `IPHONEOS_DEPLOYMENT_TARGET = 15.0`; although the product
-requirement mentions iOS 13 minimum, the checked-in scaffold is presently targeting 15.0 and
-needs Xcode validation/signing on the user's Mac.
+The Xcode project targets iOS 15 or newer. Signed builds and installation on a physical
+iPhone require the configured development team and a connected, trusted device.
+
+## Background access
+Photo/contact permission requests happen only in foreground setup or a manual backup.
+Headless jobs check existing grants; limited photo access remains limited to those assets.
+No location/audio background mode or always-on execution workaround is used.
+
+Tokens used by enabled background features are kept in Keychain with
+`AfterFirstUnlockThisDeviceOnly` protection. Migration updates the existing item's
+attributes atomically without deleting/recreating it or putting credentials in
+preferences. Queue/staging file protection allows access after first unlock without
+disabling protection. Before the first unlock after a reboot, work must wait.
+
+Native URLSession has its own ATS/TLS behavior, unlike Dart sockets. LAN exceptions
+are limited to supported local resources; HTTPS self-signed trust is explicit and
+scoped to the selected server. Wi-Fi-only native transfers disallow cellular.

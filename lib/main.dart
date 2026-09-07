@@ -2,10 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app.dart';
-import 'core/config/constants.dart';
 import 'core/storage/prefs.dart';
-import 'data/models/backup_settings.dart';
 import 'data/services/background_service.dart';
+import 'data/services/backup_errors.dart';
 import 'data/services/notification_service.dart';
 import 'state/core_providers.dart';
 
@@ -20,18 +19,9 @@ Future<void> main() async {
   await NotificationService.instance.init();
   try {
     await BackgroundService.initialize();
-    if (prefs.notificationsEnabled) {
-      await BackgroundService.enableChangePolling();
-    }
-    final backupJson = prefs.readJson(StoreKeys.backupSettings);
-    if (backupJson != null) {
-      final backup = BackupSettings.fromJson(backupJson);
-      if (backup.runnable) {
-        await BackgroundService.enableBackup(wifiOnly: backup.wifiOnly);
-      }
-    }
-  } catch (_) {
-    /* WorkManager is unavailable on some platforms/emulators; ignore. */
+    await BackgroundService.reconcileScheduling();
+  } catch (error) {
+    await prefs.setBackgroundError(backupFailureMessage(error));
   }
 
   runApp(

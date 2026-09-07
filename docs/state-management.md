@@ -11,8 +11,15 @@ The app uses Riverpod 3.x `Notifier`/`NotifierProvider` for mutable app state an
 | Provider | File | State |
 | --- | --- | --- |
 | `prefsProvider` | `core_providers.dart` | Overridden `Prefs`; must be loaded before `runApp`. |
-| `secureStoreProvider` | `core_providers.dart` | Secure per-instance JWT store. |
+| `secureStoreProvider` | `core_providers.dart` | Secure per-instance/account JWT store. |
 | `localDbProvider` | `core_providers.dart` | Lazy `LocalDb.open()` future. |
+
+`LocalDb.open()` configures WAL and a 5000 ms busy timeout before schema callbacks.
+Both setting pragmas return a result row and must use `rawQuery`, not `execute`:
+iOS sqflite rejects result-returning statements on its non-query execution path.
+The opening callback is shared by foreground backup, headless work, and pausing a
+previous account's backups during login/switching. Preserve that pause safeguard;
+a database failure must not silently activate another account or reset backup data.
 
 ## Connection flow
 `ConnectionController` owns `ConnectionState(instances, activeId)`.
@@ -20,8 +27,8 @@ The app uses Riverpod 3.x `Notifier`/`NotifierProvider` for mutable app state an
 | Action | Effect |
 | --- | --- |
 | `addOrUpdate(instance, activate)` | Merges by `instance.id`, preserves self-signed trust, optionally activates, writes prefs. |
-| `setActive(id)` | Changes active server; router/session rebuild. |
-| `remove(id)` | Removes saved server, clears active if needed, deletes secure token. |
+| `setActive(id)` | Pauses previous account backup, changes active server, rebuilds router/session. |
+| `remove(id)` | Cancels that server's queued backups, removes it, deletes its account tokens. |
 | `markConnected(id)` | Updates `lastConnectedAt`. |
 
 `activeInstanceProvider` selects `ConnectionState.active` for Dio/session/upload/backup.
@@ -29,7 +36,7 @@ The app uses Riverpod 3.x `Notifier`/`NotifierProvider` for mutable app state an
 ## Session flow
 `SessionController` rebuilds whenever `activeInstanceProvider` changes:
 1. no active server → `unauthenticated`;
-2. active server → load per-instance view mode and asynchronously read secure token;
+2. active server → load view mode and selected account, then read its secure token;
 3. no token → `unauthenticated`;
 4. token exists → set token, call `/api/auth/me`, then authenticate or delete invalid token.
 
@@ -41,7 +48,14 @@ The app uses Riverpod 3.x `Notifier`/`NotifierProvider` for mutable app state an
 | `viewMode` | Admin cookie value, default `admin`. |
 | `effectiveViewMode` | Admins use chosen mode; normal users behave as `user`. |
 
-401 responses call `handleUnauthorized()`, delete the active token, and route back to login.
+Accounts persist the verified server user ID learned from `/api/auth/me`.
+Backup settings, jobs and completion history use this identity, not whichever username
+happens to be visible later. Account switches invalidate the old backup generation and
+pause its attempts. Logout cancels work before credential deletion.
+
+401 responses call `handleUnauthorized()`, pause the expired account's work, delete
+its token, and route back to login. Verification of a different account handles its
+own 401 so it does not accidentally remove the previous account's credentials.
 
 ## API providers
 `dioProvider` rebuilds on active server changes. Token/view mode are read lazily from session
@@ -69,8 +83,10 @@ Settings or Drives toolbar updates `SessionController`, persists `Prefs`, and ca
 | admin FutureProviders | `features/admin/*` | Dashboard/users/access/config/server status; invalidated after mutations. |
 | `themeModeProvider` | `settings_controller.dart` | Persists `ThemeMode.system|light|dark`. |
 | `notificationsEnabledProvider` | `settings_controller.dart` | Persists notification toggle and registers/cancels change polling. |
-| `backupSettingsProvider` | `backup_controller.dart` | Persists `BackupSettings` and registers/cancels periodic backup. |
-| `backupRunnerProvider` | `backup_controller.dart` | Foreground backup run progress. |
+| `backupSettingsProvider` | `backup_controller.dart` | Account-owned configuration; permissions, charging, scheduling and explicit legacy import. |
+| `backupCoordinatorProvider` | `backup_controller.dart` | Shared durable backup queue/coordinator. |
+| `backupRunnerProvider` | `backup_controller.dart` | Preparation/native progress, catch-up, completion reconciliation and status. |
+| `backgroundAvailabilityProvider` | `backup_controller.dart` | Native iOS background restrictions and pending requests. |
 
 ## Live events
 `liveEventsProvider` is a `NotifierProvider<LiveEventsController,bool>`. It self-gates on
@@ -80,4 +96,7 @@ reconnects when auth or server state changes.
 ## Background isolate boundary
 WorkManager code must not read Riverpod providers. `background_service.dart` and
 `runHeadlessBackup()` reconstruct dependencies from persisted data: SharedPreferences,
-secure storage, `buildDio()`, `UploadService`, `MediaService`, `LocalDb`.
+secure storage, current account identity, `MediaService`, and `LocalDb`.
+Preferences are reloaded across engines. LocalDb unique claims/leases and the native
+task journal coordinate concurrent work. Native events are acknowledged only after
+SQLite updates succeed, keeping late/replayed callbacks attached to the original job.

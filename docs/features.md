@@ -12,6 +12,7 @@ User-facing capabilities are implemented as Flutter feature folders backed by re
 | Health validation | `ConnectController`, `ConnectRepository` | `GET /api/health`. |
 | Self-signed TLS approval | `ConnectScreen._offerTrust()`, `buildDio()`, `_TusClient` | per-instance `trustSelfSigned`. |
 | Login/register/logout/session restore | `LoginScreen`, `SessionController`, `AuthRepository` | `/api/auth/*`, secure JWT storage. |
+| Multiple saved accounts | `account_switcher.dart`, `SessionController`, `Prefs` | Per-account tokens and verified IDs; switching pauses the previous account's backup. |
 
 ## Main shell
 `HomeShell` is a bottom navigation shell with four tabs:
@@ -51,10 +52,18 @@ in-app video player.
 | Foreground change alerts | `LiveEventsController` | `GET /api/events/user`. |
 | Background change alerts | `BackgroundService._pollChanges()` | `GET /api/changes?since=<cursor>`. |
 | Notification toggle | `notificationsEnabledProvider`, `SettingsScreen` | `ld.notifications_enabled`. |
-| Auto-backup settings | `BackupSettings`, `BackupScreen` | `ld.backup_settings`. |
-| Foreground backup | `BackupRunner` | `BackupEngine` + tus. |
-| Background backup | `runHeadlessBackup()` | WorkManager task `.backup`. |
-| Dedupe ledger | `LocalDb` | unique `(instance_id, asset_id)` in `backup_ledger`. |
+| Account-owned settings | `BackupSettings`, `BackupScreen` | `ld.backup_profile.<profileId>`; old global settings require explicit import. |
+| Manual and automatic backup | `BackupRunner`, `BackupCoordinator` | Shared durable queue; manual mode bypasses charging only. |
+| iOS background backup | `runHeadlessBackup()`, native upload bridge | BGProcessing preparation plus file-backed background URLSession tus transfers. |
+| Android background backup | `runHeadlessBackup()` | WorkManager periodic task and resumable Dart transport. |
+| Foreground catch-up | `LocalDriveApp`, `BackupRunner` | Launch/resume/network/power changes; bounded continuation and retry backoff. |
+| Dedupe and recovery | `LocalDb`, `BackupTusService` | Account/destination/source-scoped ledger, server receipts, commit-before-ACK native events. |
+| Truthful progress | `BackupSnapshot`, `BackupScreen` | Preparing, queued, uploading, paused, waiting, failed and complete; last attempt/success. |
+
+Automatic preparation defaults to Wi-Fi and charging. The Mac/drive must be reachable,
+and access/source permissions are still required. iOS controls scanning windows;
+force-quit prevents automatic relaunch until reopen. See
+[notifications-backup.md](notifications-backup.md) for limits and completion semantics.
 
 ## Admin console
 Admin users can open Settings → Admin console.

@@ -8,7 +8,8 @@ A **Flutter iOS/Android mobile client** for the sibling LocalDrive server produc
 `../LocalDrive-Master` (Electron/React/TypeScript macOS app). This app does not embed a
 server; it discovers or stores LAN LocalDrive instances, authenticates to the selected
 instance, browses drives/files, uploads device content, receives change notifications, and
-runs periodic backup/polling jobs against LocalDrive-Master's HTTP API.
+backs up through account-owned durable jobs. iOS uses BGProcessing plus native background
+URLSession transfers; Android uses WorkManager and the Dart transport.
 
 Changes to LocalDrive-Master server APIs that this app depends on must stay
 **backward-compatible** and be documented in both KBs (`LocalDrive-App/docs/` and
@@ -20,8 +21,8 @@ Changes to LocalDrive-Master server APIs that this app depends on must stay
 - **Routing:** `go_router` with connection/auth redirects in `lib/routing/router.dart`.
 - **HTTP:** Dio, bearer JWT interceptor, `ld_view` admin-scope cookie, optional self-signed
   TLS trust. tus uploads use `tus_client` + `package:http`.
-- **Storage:** `flutter_secure_storage` for per-instance JWTs, `shared_preferences` via
-  `Prefs`, `sqflite` via `LocalDb` for backup ledger and upload queue.
+- **Storage:** `flutter_secure_storage` for per-instance/account JWTs, `shared_preferences`
+  via `Prefs`, and schema-v3 `LocalDb` for backup jobs, ledger, leases, attempts and events.
 - **Device services:** `nsd` mDNS discovery, `mobile_scanner` QR, `flutter_local_notifications`,
   `workmanager`, `photo_manager`, `flutter_contacts`, `file_picker`, `open_filex`,
   `share_plus`, `cached_network_image`.
@@ -50,15 +51,30 @@ source ~/.localdrive_flutter_env.sh && flutter test
 source ~/.localdrive_flutter_env.sh && flutter build apk --debug
 ```
 - Android `compileSdk` is pinned to **36** in both Gradle files; do not revert it.
+- Preserve the Workmanager Kotlin compatibility hook while AGP built-in Kotlin is disabled.
 - `permission_handler` is pinned to `^11.3.1` to avoid the API-37 build break here.
-- iOS is **scaffold-only** on this host: no full Xcode/signing validation here. Build iOS on
-  the user's Mac with Xcode and signing.
+- iOS is buildable on this Mac with Xcode 16.4; source the same environment script for
+  Flutter/Xcode/CocoaPods commands. Preserve the pinned pre-iOS-26 plugin versions and
+  configured signing team. Only a connected physical iPhone can validate background transfer.
+- Direct Xcode builds produce `build/ios/Release-iphoneos/Runner.app`; the usual Flutter
+  output can be stale. Verify the actual artifact and update in place, never uninstall.
+- Let the app create its staging directories before copying fixtures: CoreDevice can leave
+  root-owned parents that the app cannot write. Do not relax protection or reset data.
 
 ## Key invariants
-- **Tokens are secrets:** JWTs live only in secure storage under `ld.token.<instanceId>`;
+- **Tokens are secrets:** JWTs live only in secure storage under
+  `ld.token.<instanceId>::<username>` (the per-instance key is legacy migration only);
   never log bearer tokens, cookies, passwords, QR payloads with credentials, or cert details.
 - **Instance isolation:** saved servers are `LdInstance` records keyed by
-  `scheme://host:port`; tokens, view mode, and change cursors are per instance.
+  `scheme://host:port`. View mode is per instance; tokens, backup state and polling cursors
+  are per account. Backup profiles use the verified server user ID, not a guessed owner.
+- **Durable backup:** only the active account submits work. Keep generation fences and
+  pause/cancel before switching or deleting credentials. Preserve unowned legacy rows.
+  Read native events, commit the SQLite ledger/queue transaction, then ACK.
+- **Database opening:** both WAL and busy-timeout setters return rows; use `rawQuery`.
+  Cover `LocalDb.open()`, not only mocked migrations. Never wipe storage to fix an error.
+- **Policy:** charging-only and Wi-Fi-only default on; manual backup bypasses only charging.
+  iOS scheduling is OS-controlled; force-quit prevents automatic relaunch until reopened.
 - **Path/scope semantics mirror the server:** client paths are scope-relative POSIX paths.
   Do not invent absolute server paths or bypass LocalDrive-Master RBAC.
 - **Drive access is opt-in:** non-admins request access; admins approve. `GET /api/drives`
@@ -70,7 +86,13 @@ source ~/.localdrive_flutter_env.sh && flutter build apk --debug
 - **Self-signed TLS is explicit trust:** only use permissive certificate handling for an
   instance after user approval.
 - **Server API compatibility:** additions consumed here (`_localdrive._tcp`,
-  `/api/events/user`, `/api/changes`) must remain additive/backward-compatible and documented.
+  `/api/events/user`, `/api/changes`, `backgroundBackupTus`, backup receipts) must stay
+  additive and documented. Bytes still use tus; offset equals length is not completion proof.
+
+## Git
+Remote: `github.com/sudiptab2100/LocalDrive-App`. Commit/push only when requested, on the
+current branch; fetch and rebase onto its remote counterpart before pushing. Include:
+`Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
 ## Knowledge base index
 Start at [`docs/README.md`](../docs/README.md). Key pages:

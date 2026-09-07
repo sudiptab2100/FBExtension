@@ -34,6 +34,7 @@ class Api {
 
   // ---- Uploads (tus) -------------------------------------------------------
   static const upload = '/api/upload';
+  static const backupUploads = '/api/backup/uploads';
 
   // ---- Search / stats ------------------------------------------------------
   static const search = '/api/search';
@@ -92,10 +93,18 @@ class StoreKeys {
   // Multi-account (per server): a token is stored per (instance, username) so
   // several users can stay signed in on the same server and switch instantly.
   static const userTokenSep = '::'; // secure key: ld.token.<instanceId>::<user>
-  static const accountsPrefix = 'ld.accounts.'; // prefs; + instanceId -> [Account]
-  static const activeAccountPrefix = 'ld.active_account.'; // prefs; + instanceId
+  static const accountsPrefix =
+      'ld.accounts.'; // prefs; + instanceId -> [Account]
+  static const activeAccountPrefix =
+      'ld.active_account.'; // prefs; + instanceId
   static const themeMode = 'ld.theme_mode';
   static const backupSettings = 'ld.backup_settings';
+  static const backupProfilePrefix = 'ld.backup_profile.';
+  static const backupGeneration = 'ld.backup_generation';
+  static const legacyBackupOwner = 'ld.legacy_backup_owner';
+  static const backgroundError = 'ld.background_error';
+  static const backupAttemptPrefix = 'ld.backup_attempt.';
+  static const backupBlockedPrefix = 'ld.backup_blocked.';
   static const lastChangeCursor = 'ld.change_cursor.'; // + instanceId
 }
 

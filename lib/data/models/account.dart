@@ -10,42 +10,50 @@ class Account {
     required this.role,
     required this.addedAt,
     this.displayName,
+    this.userId,
   });
 
   final String username;
   final UserRole role;
   final String addedAt;
+  final int? userId;
 
   /// Optional friendly name; falls back to [username].
   final String? displayName;
 
   bool get isAdmin => role == UserRole.admin;
-  String get label => (displayName?.isNotEmpty == true) ? displayName! : username;
+  String get label =>
+      (displayName?.isNotEmpty == true) ? displayName! : username;
 
   factory Account.fromUser(AppUser u) => Account(
-        username: u.username,
-        role: u.role,
-        addedAt: DateTime.now().toIso8601String(),
-      );
+    username: u.username,
+    role: u.role,
+    addedAt: DateTime.now().toIso8601String(),
+    userId: u.id,
+  );
 
-  Account copyWith({UserRole? role, String? displayName}) => Account(
+  Account copyWith({UserRole? role, String? displayName, int? userId}) =>
+      Account(
         username: username,
         role: role ?? this.role,
         addedAt: addedAt,
         displayName: displayName ?? this.displayName,
+        userId: userId ?? this.userId,
       );
 
   factory Account.fromJson(Map<String, dynamic> json) => Account(
-        username: asString(json['username']),
-        role: AppUser.roleFromString(asStringOrNull(json['role'])),
-        addedAt: asString(json['addedAt']),
-        displayName: asStringOrNull(json['displayName']),
-      );
+    username: asString(json['username']),
+    role: AppUser.roleFromString(asStringOrNull(json['role'])),
+    addedAt: asString(json['addedAt']),
+    displayName: asStringOrNull(json['displayName']),
+    userId: json['userId'] is int ? json['userId'] as int : null,
+  );
 
   Map<String, dynamic> toJson() => {
-        'username': username,
-        'role': role.name,
-        'addedAt': addedAt,
-        'displayName': displayName,
-      };
+    'username': username,
+    'role': role.name,
+    'addedAt': addedAt,
+    'displayName': displayName,
+    'userId': userId,
+  };
 }
